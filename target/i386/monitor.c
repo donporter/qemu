@@ -107,7 +107,7 @@ static bool ptiter_init(Monitor *mon, PTIter *it)
 #endif
     CPUArchState *env;
 
-    env = mon_get_cpu_env();
+    env = mon_get_cpu_env(mon);
 
     if (!(env->cr[0] & CR0_PG_MASK)) {
         monitor_printf(mon, "PG disabled\n");

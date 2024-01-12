@@ -249,11 +249,10 @@ ERST
     },
 #endif
 
-STEXI
-@item info pg
-@findex pg
-Show the page table.
-ETEXI
+SRST
+  ``info pg``
+    Show the page table.
+ERST
 
     {
         .name       = "mtree",
