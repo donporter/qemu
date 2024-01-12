@@ -46,6 +46,8 @@
 #include "trace.h"
 #include "qom/object.h"
 
+#include "monitor/monitor.h"
+
 #define E1000_DEBUG
 
 #ifdef E1000_DEBUG
