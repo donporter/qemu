@@ -491,10 +491,11 @@ static G_NORETURN void raise_stage2(CPUX86State *env, TranslateFault *err,
     cpu_vmexit(env, SVM_EXIT_NPF, exit_info_1, retaddr);
 }
 
-static bool get_physical_address(CPUX86State *env, vaddr addr,
-                                 MMUAccessType access_type, int mmu_idx,
-                                 TranslateResult *out, TranslateFault *err,
-                                 uint64_t ra)
+static
+bool x86_cpu_get_physical_address(CPUX86State *env, vaddr addr,
+                                  MMUAccessType access_type, int mmu_idx,
+                                  TranslateResult *out,
+                                  TranslateFault *err, uint64_t ra)
 {
     TranslateParams in;
     bool use_stage2 = env->hflags2 & HF2_NPT_MASK;
@@ -511,7 +512,8 @@ static bool get_physical_address(CPUX86State *env, vaddr addr,
             in.cr3 = env->nested_cr3;
             in.pg_mode = env->nested_pg_mode;
             in.mmu_idx =
-                env->nested_pg_mode & PG_MODE_LMA ? MMU_USER64_IDX : MMU_USER32_IDX;
+                env->nested_pg_mode & PG_MODE_LMA ?
+                MMU_USER64_IDX : MMU_USER32_IDX;
             in.ptw_idx = MMU_PHYS_IDX;
 
             if (!mmu_translate(env, &in, out, err, ra)) {
@@ -565,8 +567,8 @@ bool x86_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     TranslateResult out;
     TranslateFault err;
 
-    if (get_physical_address(env, addr, access_type, mmu_idx, &out, &err,
-                             retaddr)) {
+    if (x86_cpu_get_physical_address(env, addr, access_type, mmu_idx, &out,
+                                     &err, retaddr)) {
         /*
          * Even if 4MB pages, we map only one 4KB page in the cache to
          * avoid filling it too fast.

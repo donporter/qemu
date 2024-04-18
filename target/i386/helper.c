@@ -26,6 +26,7 @@
 #include "sysemu/hw_accel.h"
 #include "monitor/monitor.h"
 #include "kvm/kvm_i386.h"
+#include "exec/cpu_ldst.h"
 #endif
 #include "qemu/log.h"
 #ifdef CONFIG_TCG
@@ -231,6 +232,8 @@ void cpu_x86_update_cr4(CPUX86State *env, uint32_t new_cr4)
 }
 
 #if !defined(CONFIG_USER_ONLY)
+
+
 hwaddr x86_cpu_get_phys_page_attrs_debug(CPUState *cs, vaddr addr,
                                          MemTxAttrs *attrs)
 {
