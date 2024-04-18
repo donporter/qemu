@@ -2152,7 +2152,8 @@ int cpu_x86_support_mca_broadcast(CPUX86State *env);
 bool x86_cpu_get_physical_address(CPUX86State *env, vaddr addr,
                                   MMUAccessType access_type, int mmu_idx,
                                   X86TranslateResult *out,
-                                  X86TranslateFault *err, uint64_t ra);
+                                  X86TranslateFault *err, uint64_t ra,
+                                  bool read_only);
 
 hwaddr x86_cpu_get_phys_page_attrs_debug(CPUState *cpu, vaddr addr,
                                          MemTxAttrs *attrs);
