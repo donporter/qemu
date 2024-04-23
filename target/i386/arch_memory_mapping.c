@@ -25,20 +25,16 @@
 /**
  * mmu_page_table_root - Given a CPUState, return the physical address
  *                       of the current page table root, as well as
- *                       write the height of the tree into *height,
- *                       and write the starting virtual address upper
- *                       bits of the first root entry in *vaddr.
+ *                       write the height of the tree into *height.
  *
  * @cs - CPU state
  * @height - a pointer to an integer, to store the page table tree height
- * @vaddr - a pointer to an integer, to store the starting virtual address
- *          of the first root entry.  Often zero, but not always.
  *
  * Returns a hardware address on success.  Should not fail (i.e., caller is
  * responsible to ensure that a page table is actually present).
  */
 static
-hwaddr mmu_page_table_root(CPUState *cs, int *height, target_ulong *vaddr)
+hwaddr mmu_page_table_root(CPUState *cs, int *height)
 {
     X86CPU *cpu = X86_CPU(cs);
     CPUX86State *env = &cpu->env;
@@ -52,22 +48,18 @@ hwaddr mmu_page_table_root(CPUState *cs, int *height, target_ulong *vaddr)
         if (env->hflags & HF_LMA_MASK) {
             if (env->cr[4] & CR4_LA57_MASK) {
                 *height = 5;
-                *vaddr = (0x7fULL << 57);
             } else {
                 *height = 4;
-                *vaddr = (0xffffULL << 48);
             }
             return (env->cr[3] & PLM4_ADDR_MASK) & a20_mask;
         } else
 #endif
         {
             *height = 3;
-            *vaddr = 0;
             return (env->cr[3] & ~0x1f) & a20_mask;
         }
     } else {
         *height = 2;
-        *vaddr = 0;
         return (env->cr[3] & ~0xfff) & a20_mask;
     }
 }
@@ -91,6 +83,8 @@ int mmu_page_table_entries_per_node(CPUState *cs, int height)
     CPUX86State *env = &cpu->env;
     bool pae_enabled = env->cr[4] & CR4_PAE_MASK;
 
+    assert(height < 6);
+    assert(height > 0);
 
     switch (height) {
 #ifdef TARGET_X86_64
@@ -183,6 +177,9 @@ get_pte(CPUState *cs, hwaddr node, int i, int height,
                 shift = 22;
             }
             break;
+        case 1:
+            shift = 12;
+            break;
         default:
             g_assert_not_reached();
         }
@@ -206,23 +203,22 @@ _mmu_pte_check_bits(CPUState *cs, PTE_t *pte, int flag)
  * mmu_pte_present - Return true if the pte is
  *                   marked 'present'
  */
-static bool
+bool
 mmu_pte_present(CPUState *cs, PTE_t *pte)
 {
     return _mmu_pte_check_bits(cs, pte, PG_PRESENT_MASK);
 }
 
 /**
- * mmu_pte_present - Return true if the pte is
- *                   a page table leaf, false if
- *                   the pte points to another
- *                   node in the radix tree.
+ * mmu_pte_leaf - Return true if the pte is
+ *                a page table leaf, false if
+ *                the pte points to another
+ *                node in the radix tree.
  */
-
-static bool
-mmu_pte_leaf(CPUState *cs, PTE_t *pte)
+bool
+mmu_pte_leaf(CPUState *cs, int height, PTE_t *pte)
 {
-    return _mmu_pte_check_bits(cs, pte, PG_PSE_MASK);
+    return height == 1 || _mmu_pte_check_bits(cs, pte, PG_PSE_MASK);
 }
 
 /**
@@ -295,6 +291,8 @@ mmu_pte_child(CPUState *cs, PTE_t *pte, int height)
  * @visit_interior_nodes - if true, call fn() on page table entries in
  *                         interior nodes.  If false, only call fn() on page
  *                         table entries in leaves.
+ * @visit_not_present - if true, call fn() on entries that are not present.
+ *                         if false, visit only present entries.
  * @node - The physical address of the current page table radix tree node
  * @vaddr - The virtual address bits translated in walking the page table to
  *          node
@@ -310,19 +308,27 @@ static bool
 _for_each_pte(CPUState *cs,
               int (*fn)(CPUState *cs, void *data, PTE_t *pte,
                         target_ulong vaddr, int height),
-              void *data, bool visit_interior_nodes, hwaddr node,
+              void *data, bool visit_interior_nodes,
+              bool visit_not_present, hwaddr node,
               target_ulong vaddr, int height)
 {
-    int ptes_per_node = mmu_page_table_entries_per_node(cs, height);
+    int ptes_per_node;
     int i;
+
+    assert(height > 0);
+
+    ptes_per_node = mmu_page_table_entries_per_node(cs, height);
 
     for (i = 0; i < ptes_per_node; i++) {
         PTE_t pt_entry;
         target_ulong vaddr_i;
-        get_pte(cs, node, i, height, &pt_entry, vaddr, &vaddr_i);
+        bool pte_present;
 
-        if (mmu_pte_present(cs, &pt_entry)) {
-            if (height == 1 || mmu_pte_leaf(cs, &pt_entry)) {
+        get_pte(cs, node, i, height, &pt_entry, vaddr, &vaddr_i);
+        pte_present = mmu_pte_present(cs, &pt_entry);
+
+        if (pte_present || visit_not_present) {
+            if ((!pte_present) || mmu_pte_leaf(cs, height, &pt_entry)) {
                 if (fn(cs, data, &pt_entry, vaddr_i, height)) {
                     /* Error */
                     return false;
@@ -335,14 +341,16 @@ _for_each_pte(CPUState *cs,
                     }
                 }
                 hwaddr child = mmu_pte_child(cs, &pt_entry, height);
-                assert(height);
+                assert(height > 1);
                 if (!_for_each_pte(cs, fn, data, visit_interior_nodes,
-                                   child, height - 1, vaddr_i)) {
+                                   visit_not_present, child, vaddr_i,
+                                   height - 1)) {
                     return false;
                 }
             }
         }
     }
+
     return true;
 }
 
@@ -361,6 +369,8 @@ _for_each_pte(CPUState *cs,
  * @data - opaque pointer; passed through to fn
  * @visit_interior_nodes - if true, call fn() on interior entries in
  *                         page table; if false, visit only leaf entries.
+ * @visit_not_present - if true, call fn() on entries that are not present.
+ *                         if false, visit only present entries.
  *
  * Returns true on success, false on error.
  *
@@ -368,10 +378,11 @@ _for_each_pte(CPUState *cs,
 bool for_each_pte(CPUState *cs,
                   int (*fn)(CPUState *cs, void *data, PTE_t *pte,
                             target_ulong vaddr, int height),
-                  void *data, bool visit_interior_nodes)
+                  void *data, bool visit_interior_nodes,
+                  bool visit_not_present)
 {
     int height;
-    target_ulong vaddr;
+    target_ulong vaddr = 0;
     hwaddr root;
 
     if (!cpu_paging_enabled(cs)) {
@@ -379,11 +390,13 @@ bool for_each_pte(CPUState *cs,
         return true;
     }
 
-    root = mmu_page_table_root(cs, &height, &vaddr);
+    root = mmu_page_table_root(cs, &height);
+
+    assert(height > 1);
 
     /* Recursively call a helper to walk the page table */
-    return _for_each_pte(cs, fn, data, visit_interior_nodes, root, vaddr,
-                         height);
+    return _for_each_pte(cs, fn, data, visit_interior_nodes, visit_not_present,
+                         root, vaddr, height);
 }
 
 /**
@@ -450,5 +463,5 @@ static int add_memory_mapping_to_list(CPUState *cs, void *data, PTE_t *pte,
 bool x86_cpu_get_memory_mapping(CPUState *cs, MemoryMappingList *list,
                                 Error **errp)
 {
-    return for_each_pte(cs, &add_memory_mapping_to_list, list, false);
+    return for_each_pte(cs, &add_memory_mapping_to_list, list, false, false);
 }

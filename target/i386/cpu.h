@@ -2142,11 +2142,13 @@ int x86_cpu_write_elf64_qemunote(WriteCoreDumpFunction f, CPUState *cpu,
 int x86_cpu_write_elf32_qemunote(WriteCoreDumpFunction f, CPUState *cpu,
                                  DumpState *s);
 
-
+bool mmu_pte_leaf(CPUState *cs, int height, PTE_t *pte);
+bool mmu_pte_present(CPUState *cs, PTE_t *pte);
 bool for_each_pte(CPUState *cs,
                   int (*fn)(CPUState *cs, void *data, PTE_t *pte,
                             target_ulong vaddr, int height),
-                  void *data, bool visit_interior_nodes);
+                  void *data, bool visit_interior_nodes,
+                  bool visit_not_present);
 
 bool x86_cpu_get_memory_mapping(CPUState *cpu, MemoryMappingList *list,
                                 Error **errp);
