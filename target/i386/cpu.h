@@ -2144,6 +2144,7 @@ int x86_cpu_write_elf32_qemunote(WriteCoreDumpFunction f, CPUState *cpu,
 
 bool mmu_pte_leaf(CPUState *cs, int height, PTE_t *pte);
 bool mmu_pte_present(CPUState *cs, PTE_t *pte);
+hwaddr mmu_pte_child(CPUState *cs, PTE_t *pte, int height);
 bool for_each_pte(CPUState *cs,
                   int (*fn)(CPUState *cs, void *data, PTE_t *pte,
                             target_ulong vaddr, int height),

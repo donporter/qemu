@@ -232,7 +232,7 @@ mmu_pte_leaf(CPUState *cs, int height, PTE_t *pte)
  * Returns the physical address stored in pte on success,
  *     -1 on error.
  */
-static hwaddr
+hwaddr
 mmu_pte_child(CPUState *cs, PTE_t *pte, int height)
 {
     X86CPU *cpu = X86_CPU(cs);

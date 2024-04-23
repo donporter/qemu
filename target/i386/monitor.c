@@ -71,159 +71,72 @@ static void print_pte(Monitor *mon, CPUArchState *env, hwaddr addr,
                    pte & PG_RW_MASK ? 'W' : '-');
 }
 
-static void tlb_info_32(Monitor *mon, CPUArchState *env)
+struct tlb_print_state {
+    Monitor *mon;
+    CPUArchState *env;
+};
+
+static
+int mem_print_tlb(CPUState *cs, void *data, PTE_t *pte,
+                  target_ulong vaddr, int height)
 {
-    unsigned int l1, l2;
-    uint32_t pgd, pde, pte;
-
-    pgd = env->cr[3] & ~0xfff;
-    for(l1 = 0; l1 < 1024; l1++) {
-        cpu_physical_memory_read(pgd + l1 * 4, &pde, 4);
-        pde = le32_to_cpu(pde);
-        if (pde & PG_PRESENT_MASK) {
-            if ((pde & PG_PSE_MASK) && (env->cr[4] & CR4_PSE_MASK)) {
-                /* 4M pages */
-                print_pte(mon, env, (l1 << 22), pde, ~((1 << 21) - 1));
-            } else {
-                for(l2 = 0; l2 < 1024; l2++) {
-                    cpu_physical_memory_read((pde & ~0xfff) + l2 * 4, &pte, 4);
-                    pte = le32_to_cpu(pte);
-                    if (pte & PG_PRESENT_MASK) {
-                        print_pte(mon, env, (l1 << 22) + (l2 << 12),
-                                  pte & ~PG_PSE_MASK,
-                                  ~0xfff);
-                    }
-                }
-            }
-        }
-    }
-}
-
-static void tlb_info_pae32(Monitor *mon, CPUArchState *env)
-{
-    unsigned int l1, l2, l3;
-    uint64_t pdpe, pde, pte;
-    uint64_t pdp_addr, pd_addr, pt_addr;
-
-    pdp_addr = env->cr[3] & ~0x1f;
-    for (l1 = 0; l1 < 4; l1++) {
-        cpu_physical_memory_read(pdp_addr + l1 * 8, &pdpe, 8);
-        pdpe = le64_to_cpu(pdpe);
-        if (pdpe & PG_PRESENT_MASK) {
-            pd_addr = pdpe & 0x3fffffffff000ULL;
-            for (l2 = 0; l2 < 512; l2++) {
-                cpu_physical_memory_read(pd_addr + l2 * 8, &pde, 8);
-                pde = le64_to_cpu(pde);
-                if (pde & PG_PRESENT_MASK) {
-                    if (pde & PG_PSE_MASK) {
-                        /* 2M pages with PAE, CR4.PSE is ignored */
-                        print_pte(mon, env, (l1 << 30) + (l2 << 21), pde,
-                                  ~((hwaddr)(1 << 20) - 1));
-                    } else {
-                        pt_addr = pde & 0x3fffffffff000ULL;
-                        for (l3 = 0; l3 < 512; l3++) {
-                            cpu_physical_memory_read(pt_addr + l3 * 8, &pte, 8);
-                            pte = le64_to_cpu(pte);
-                            if (pte & PG_PRESENT_MASK) {
-                                print_pte(mon, env, (l1 << 30) + (l2 << 21)
-                                          + (l3 << 12),
-                                          pte & ~PG_PSE_MASK,
-                                          ~(hwaddr)0xfff);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
+    struct tlb_print_state *state = (struct tlb_print_state *) data;
+    bool pae_enabled = state->env->cr[4] & CR4_PAE_MASK;
 #ifdef TARGET_X86_64
-static void tlb_info_la48(Monitor *mon, CPUArchState *env,
-        uint64_t l0, uint64_t pml4_addr)
-{
-    uint64_t l1, l2, l3, l4;
-    uint64_t pml4e, pdpe, pde, pte;
-    uint64_t pdp_addr, pd_addr, pt_addr;
-
-    for (l1 = 0; l1 < 512; l1++) {
-        cpu_physical_memory_read(pml4_addr + l1 * 8, &pml4e, 8);
-        pml4e = le64_to_cpu(pml4e);
-        if (!(pml4e & PG_PRESENT_MASK)) {
-            continue;
+    bool long_mode_enabled = state->env->hflags & HF_LMA_MASK;
+#endif
+    hwaddr mask = 0;
+    switch (height) {
+#ifdef TARGET_X86_64
+    case 5:
+        assert(state->env->cr[4] & CR4_LA57_MASK);
+        g_assert_not_reached();
+    case 4:
+        assert(long_mode_enabled);
+        g_assert_not_reached();
+#endif
+    case 3:
+        assert(pae_enabled);
+#ifdef TARGET_X86_64
+        if (long_mode_enabled) {
+            mask = 0x3ffffc0000000ULL;
+        } else
+#endif
+        {
+            mask = ~((hwaddr)(1 << 20) - 1);
         }
-
-        pdp_addr = pml4e & 0x3fffffffff000ULL;
-        for (l2 = 0; l2 < 512; l2++) {
-            cpu_physical_memory_read(pdp_addr + l2 * 8, &pdpe, 8);
-            pdpe = le64_to_cpu(pdpe);
-            if (!(pdpe & PG_PRESENT_MASK)) {
-                continue;
-            }
-
-            if (pdpe & PG_PSE_MASK) {
-                /* 1G pages, CR4.PSE is ignored */
-                print_pte(mon, env, (l0 << 48) + (l1 << 39) + (l2 << 30),
-                        pdpe, 0x3ffffc0000000ULL);
-                continue;
-            }
-
-            pd_addr = pdpe & 0x3fffffffff000ULL;
-            for (l3 = 0; l3 < 512; l3++) {
-                cpu_physical_memory_read(pd_addr + l3 * 8, &pde, 8);
-                pde = le64_to_cpu(pde);
-                if (!(pde & PG_PRESENT_MASK)) {
-                    continue;
-                }
-
-                if (pde & PG_PSE_MASK) {
-                    /* 2M pages, CR4.PSE is ignored */
-                    print_pte(mon, env, (l0 << 48) + (l1 << 39) + (l2 << 30) +
-                            (l3 << 21), pde, 0x3ffffffe00000ULL);
-                    continue;
-                }
-
-                pt_addr = pde & 0x3fffffffff000ULL;
-                for (l4 = 0; l4 < 512; l4++) {
-                    cpu_physical_memory_read(pt_addr
-                            + l4 * 8,
-                            &pte, 8);
-                    pte = le64_to_cpu(pte);
-                    if (pte & PG_PRESENT_MASK) {
-                        print_pte(mon, env, (l0 << 48) + (l1 << 39) +
-                                (l2 << 30) + (l3 << 21) + (l4 << 12),
-                                pte & ~PG_PSE_MASK, 0x3fffffffff000ULL);
-                    }
-                }
-            }
-        }
+        break;
+    case 2:
+        mask = 0x3ffffffe00000ULL;
+        break;
+    case 1:
+        mask = 0x3fffffffff000ULL;
+        break;
+    default:
+            g_assert_not_reached();
     }
-}
 
-static void tlb_info_la57(Monitor *mon, CPUArchState *env)
-{
-    uint64_t l0;
-    uint64_t pml5e;
-    uint64_t pml5_addr;
-
-    pml5_addr = env->cr[3] & 0x3fffffffff000ULL;
-    for (l0 = 0; l0 < 512; l0++) {
-        cpu_physical_memory_read(pml5_addr + l0 * 8, &pml5e, 8);
-        pml5e = le64_to_cpu(pml5e);
-        if (pml5e & PG_PRESENT_MASK) {
-            tlb_info_la48(mon, env, l0, pml5e & 0x3fffffffff000ULL);
-        }
-    }
+    print_pte(state->mon, state->env, vaddr, pte->pte64_t, mask);
+    return 0;
 }
-#endif /* TARGET_X86_64 */
 
 void hmp_info_tlb(Monitor *mon, const QDict *qdict)
 {
+    CPUState *cs;
     CPUArchState *env;
+    struct tlb_print_state state;
+    state.mon = mon;
 
     env = mon_get_cpu_env(mon);
     if (!env) {
         monitor_printf(mon, "No CPU available\n");
+        return;
+    }
+    state.env = env;
+
+    cs = mon_get_cpu(mon);
+    if (!cs) {
+        monitor_printf(mon, "Unable to get CPUState.  Internal error\n");
         return;
     }
 
@@ -231,22 +144,12 @@ void hmp_info_tlb(Monitor *mon, const QDict *qdict)
         monitor_printf(mon, "PG disabled\n");
         return;
     }
-    if (env->cr[4] & CR4_PAE_MASK) {
-#ifdef TARGET_X86_64
-        if (env->hflags & HF_LMA_MASK) {
-            if (env->cr[4] & CR4_LA57_MASK) {
-                tlb_info_la57(mon, env);
-            } else {
-                tlb_info_la48(mon, env, 0, env->cr[3] & 0x3fffffffff000ULL);
-            }
-        } else
-#endif
-        {
-            tlb_info_pae32(mon, env);
-        }
-    } else {
-        tlb_info_32(mon, env);
-    }
+
+    /**
+     * 'info tlb' visits only leaf PTEs marked present.
+     * It does not check other protection bits.
+     */
+    for_each_pte(cs, &mem_print_tlb, &state, false, false);
 }
 
 static
@@ -286,7 +189,7 @@ struct mem_print_state {
 
 static
 int mem_print_pte(CPUState *cs, void *data, PTE_t *pte,
-                         target_ulong vaddr, int height)
+                  target_ulong vaddr, int height)
 {
     struct mem_print_state *state = (struct mem_print_state *) data;
 
