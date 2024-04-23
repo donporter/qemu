@@ -15,302 +15,440 @@
 #include "cpu.h"
 #include "sysemu/memory_mapping.h"
 
-/* PAE Paging or IA-32e Paging */
-static void walk_pte(MemoryMappingList *list, AddressSpace *as,
-                     hwaddr pte_start_addr,
-                     int32_t a20_mask, target_ulong start_line_addr)
-{
-    hwaddr pte_addr, start_paddr;
-    uint64_t pte;
-    target_ulong start_vaddr;
-    int i;
-
-    for (i = 0; i < 512; i++) {
-        pte_addr = (pte_start_addr + i * 8) & a20_mask;
-        pte = address_space_ldq(as, pte_addr, MEMTXATTRS_UNSPECIFIED, NULL);
-        if (!(pte & PG_PRESENT_MASK)) {
-            /* not present */
-            continue;
-        }
-
-        start_paddr = (pte & ~0xfff) & ~(0x1ULL << 63);
-        if (cpu_physical_memory_is_io(start_paddr)) {
-            /* I/O region */
-            continue;
-        }
-
-        start_vaddr = start_line_addr | ((i & 0x1ff) << 12);
-        memory_mapping_list_add_merge_sorted(list, start_paddr,
-                                             start_vaddr, 1 << 12);
-    }
-}
-
-/* 32-bit Paging */
-static void walk_pte2(MemoryMappingList *list, AddressSpace *as,
-                      hwaddr pte_start_addr, int32_t a20_mask,
-                      target_ulong start_line_addr)
-{
-    hwaddr pte_addr, start_paddr;
-    uint32_t pte;
-    target_ulong start_vaddr;
-    int i;
-
-    for (i = 0; i < 1024; i++) {
-        pte_addr = (pte_start_addr + i * 4) & a20_mask;
-        pte = address_space_ldl(as, pte_addr, MEMTXATTRS_UNSPECIFIED, NULL);
-        if (!(pte & PG_PRESENT_MASK)) {
-            /* not present */
-            continue;
-        }
-
-        start_paddr = pte & ~0xfff;
-        if (cpu_physical_memory_is_io(start_paddr)) {
-            /* I/O region */
-            continue;
-        }
-
-        start_vaddr = start_line_addr | ((i & 0x3ff) << 12);
-        memory_mapping_list_add_merge_sorted(list, start_paddr,
-                                             start_vaddr, 1 << 12);
-    }
-}
-
-/* PAE Paging or IA-32e Paging */
 #define PLM4_ADDR_MASK 0xffffffffff000ULL /* selects bits 51:12 */
 
-static void walk_pde(MemoryMappingList *list, AddressSpace *as,
-                     hwaddr pde_start_addr,
-                     int32_t a20_mask, target_ulong start_line_addr)
-{
-    hwaddr pde_addr, pte_start_addr, start_paddr;
-    uint64_t pde;
-    target_ulong line_addr, start_vaddr;
-    int i;
+/**
+ ************** code hook implementations for x86 ***********
+ */
 
-    for (i = 0; i < 512; i++) {
-        pde_addr = (pde_start_addr + i * 8) & a20_mask;
-        pde = address_space_ldq(as, pde_addr, MEMTXATTRS_UNSPECIFIED, NULL);
-        if (!(pde & PG_PRESENT_MASK)) {
-            /* not present */
-            continue;
-        }
 
-        line_addr = start_line_addr | ((i & 0x1ff) << 21);
-        if (pde & PG_PSE_MASK) {
-            /* 2 MB page */
-            start_paddr = (pde & ~0x1fffff) & ~(0x1ULL << 63);
-            if (cpu_physical_memory_is_io(start_paddr)) {
-                /* I/O region */
-                continue;
-            }
-            start_vaddr = line_addr;
-            memory_mapping_list_add_merge_sorted(list, start_paddr,
-                                                 start_vaddr, 1 << 21);
-            continue;
-        }
-
-        pte_start_addr = (pde & PLM4_ADDR_MASK) & a20_mask;
-        walk_pte(list, as, pte_start_addr, a20_mask, line_addr);
-    }
-}
-
-/* 32-bit Paging */
-static void walk_pde2(MemoryMappingList *list, AddressSpace *as,
-                      hwaddr pde_start_addr, int32_t a20_mask,
-                      bool pse)
-{
-    hwaddr pde_addr, pte_start_addr, start_paddr, high_paddr;
-    uint32_t pde;
-    target_ulong line_addr, start_vaddr;
-    int i;
-
-    for (i = 0; i < 1024; i++) {
-        pde_addr = (pde_start_addr + i * 4) & a20_mask;
-        pde = address_space_ldl(as, pde_addr, MEMTXATTRS_UNSPECIFIED, NULL);
-        if (!(pde & PG_PRESENT_MASK)) {
-            /* not present */
-            continue;
-        }
-
-        line_addr = (((unsigned int)i & 0x3ff) << 22);
-        if ((pde & PG_PSE_MASK) && pse) {
-            /*
-             * 4 MB page:
-             * bits 39:32 are bits 20:13 of the PDE
-             * bit3 31:22 are bits 31:22 of the PDE
-             */
-            high_paddr = ((hwaddr)(pde & 0x1fe000) << 19);
-            start_paddr = (pde & ~0x3fffff) | high_paddr;
-            if (cpu_physical_memory_is_io(start_paddr)) {
-                /* I/O region */
-                continue;
-            }
-            start_vaddr = line_addr;
-            memory_mapping_list_add_merge_sorted(list, start_paddr,
-                                                 start_vaddr, 1 << 22);
-            continue;
-        }
-
-        pte_start_addr = (pde & ~0xfff) & a20_mask;
-        walk_pte2(list, as, pte_start_addr, a20_mask, line_addr);
-    }
-}
-
-/* PAE Paging */
-static void walk_pdpe2(MemoryMappingList *list, AddressSpace *as,
-                       hwaddr pdpe_start_addr, int32_t a20_mask)
-{
-    hwaddr pdpe_addr, pde_start_addr;
-    uint64_t pdpe;
-    target_ulong line_addr;
-    int i;
-
-    for (i = 0; i < 4; i++) {
-        pdpe_addr = (pdpe_start_addr + i * 8) & a20_mask;
-        pdpe = address_space_ldq(as, pdpe_addr, MEMTXATTRS_UNSPECIFIED, NULL);
-        if (!(pdpe & PG_PRESENT_MASK)) {
-            /* not present */
-            continue;
-        }
-
-        line_addr = (((unsigned int)i & 0x3) << 30);
-        pde_start_addr = (pdpe & ~0xfff) & a20_mask;
-        walk_pde(list, as, pde_start_addr, a20_mask, line_addr);
-    }
-}
-
-#ifdef TARGET_X86_64
-/* IA-32e Paging */
-static void walk_pdpe(MemoryMappingList *list, AddressSpace *as,
-                      hwaddr pdpe_start_addr, int32_t a20_mask,
-                      target_ulong start_line_addr)
-{
-    hwaddr pdpe_addr, pde_start_addr, start_paddr;
-    uint64_t pdpe;
-    target_ulong line_addr, start_vaddr;
-    int i;
-
-    for (i = 0; i < 512; i++) {
-        pdpe_addr = (pdpe_start_addr + i * 8) & a20_mask;
-        pdpe = address_space_ldq(as, pdpe_addr, MEMTXATTRS_UNSPECIFIED, NULL);
-        if (!(pdpe & PG_PRESENT_MASK)) {
-            /* not present */
-            continue;
-        }
-
-        line_addr = start_line_addr | ((i & 0x1ffULL) << 30);
-        if (pdpe & PG_PSE_MASK) {
-            /* 1 GB page */
-            start_paddr = (pdpe & ~0x3fffffff) & ~(0x1ULL << 63);
-            if (cpu_physical_memory_is_io(start_paddr)) {
-                /* I/O region */
-                continue;
-            }
-            start_vaddr = line_addr;
-            memory_mapping_list_add_merge_sorted(list, start_paddr,
-                                                 start_vaddr, 1 << 30);
-            continue;
-        }
-
-        pde_start_addr = (pdpe & PLM4_ADDR_MASK) & a20_mask;
-        walk_pde(list, as, pde_start_addr, a20_mask, line_addr);
-    }
-}
-
-/* IA-32e Paging */
-static void walk_pml4e(MemoryMappingList *list, AddressSpace *as,
-                       hwaddr pml4e_start_addr, int32_t a20_mask,
-                       target_ulong start_line_addr)
-{
-    hwaddr pml4e_addr, pdpe_start_addr;
-    uint64_t pml4e;
-    target_ulong line_addr;
-    int i;
-
-    for (i = 0; i < 512; i++) {
-        pml4e_addr = (pml4e_start_addr + i * 8) & a20_mask;
-        pml4e = address_space_ldq(as, pml4e_addr, MEMTXATTRS_UNSPECIFIED,
-                                  NULL);
-        if (!(pml4e & PG_PRESENT_MASK)) {
-            /* not present */
-            continue;
-        }
-
-        line_addr = start_line_addr | ((i & 0x1ffULL) << 39);
-        pdpe_start_addr = (pml4e & PLM4_ADDR_MASK) & a20_mask;
-        walk_pdpe(list, as, pdpe_start_addr, a20_mask, line_addr);
-    }
-}
-
-static void walk_pml5e(MemoryMappingList *list, AddressSpace *as,
-                       hwaddr pml5e_start_addr, int32_t a20_mask)
-{
-    hwaddr pml5e_addr, pml4e_start_addr;
-    uint64_t pml5e;
-    target_ulong line_addr;
-    int i;
-
-    for (i = 0; i < 512; i++) {
-        pml5e_addr = (pml5e_start_addr + i * 8) & a20_mask;
-        pml5e = address_space_ldq(as, pml5e_addr, MEMTXATTRS_UNSPECIFIED,
-                                  NULL);
-        if (!(pml5e & PG_PRESENT_MASK)) {
-            /* not present */
-            continue;
-        }
-
-        line_addr = (0x7fULL << 57) | ((i & 0x1ffULL) << 48);
-        pml4e_start_addr = (pml5e & PLM4_ADDR_MASK) & a20_mask;
-        walk_pml4e(list, as, pml4e_start_addr, a20_mask, line_addr);
-    }
-}
-#endif
-
-bool x86_cpu_get_memory_mapping(CPUState *cs, MemoryMappingList *list,
-                                Error **errp)
+/**
+ * mmu_page_table_root - Given a CPUState, return the physical address
+ *                       of the current page table root, as well as
+ *                       write the height of the tree into *height,
+ *                       and write the starting virtual address upper
+ *                       bits of the first root entry in *vaddr.
+ *
+ * @cs - CPU state
+ * @height - a pointer to an integer, to store the page table tree height
+ * @vaddr - a pointer to an integer, to store the starting virtual address
+ *          of the first root entry.  Often zero, but not always.
+ *
+ * Returns a hardware address on success.  Should not fail (i.e., caller is
+ * responsible to ensure that a page table is actually present).
+ */
+static
+hwaddr mmu_page_table_root(CPUState *cs, int *height, target_ulong *vaddr)
 {
     X86CPU *cpu = X86_CPU(cs);
     CPUX86State *env = &cpu->env;
     int32_t a20_mask;
+
+    assert(cpu_paging_enabled(cs));
+    a20_mask = x86_get_a20_mask(env);
+
+    if (env->cr[4] & CR4_PAE_MASK) {
+#ifdef TARGET_X86_64
+        if (env->hflags & HF_LMA_MASK) {
+            if (env->cr[4] & CR4_LA57_MASK) {
+                *height = 5;
+                *vaddr = (0x7fULL << 57);
+            } else {
+                *height = 4;
+                *vaddr = (0xffffULL << 48);
+            }
+            return (env->cr[3] & PLM4_ADDR_MASK) & a20_mask;
+        } else
+#endif
+        {
+            *height = 3;
+            *vaddr = 0;
+            return (env->cr[3] & ~0x1f) & a20_mask;
+        }
+    } else {
+        *height = 2;
+        *vaddr = 0;
+        return (env->cr[3] & ~0xfff) & a20_mask;
+    }
+}
+
+/**
+ * mmu_page_table_entries_per_node - Return the number of
+ *                                   entries in a page table
+ *                                   node for the CPU at a given
+ *                                   height.
+ *
+ * @cs - CPU state
+ * @height - height of the page table tree to query, where the leaves
+ *          are 1.
+ *
+ * Returns a value greater than zero on success, -1 on error.
+ */
+static
+int mmu_page_table_entries_per_node(CPUState *cs, int height)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+    bool pae_enabled = env->cr[4] & CR4_PAE_MASK;
+
+
+    switch (height) {
+#ifdef TARGET_X86_64
+    case 5:
+        assert(env->cr[4] & CR4_LA57_MASK);
+    case 4:
+        assert(env->hflags & HF_LMA_MASK);
+        assert(pae_enabled);
+        return 512;
+#endif
+    case 3:
+        assert(pae_enabled);
+#ifdef TARGET_X86_64
+        if (env->hflags & HF_LMA_MASK) {
+            return 512;
+        } else
+#endif
+        {
+            return 4;
+        }
+    case 2:
+    case 1:
+        return pae_enabled ? 512 : 1024;
+    default:
+        g_assert_not_reached();
+    }
+    return -1;
+}
+
+/**
+ * get_pte - Copy the contents of the page table entry at node[i] into pt_entry.
+ *           Optionally, add the relevant bits to the virtual address in
+ *           vaddr_pte.
+ *
+ * @cs - CPU state
+ * @node - physical address of the current page table node
+ * @i - index (in page table entries, not bytes) of the page table
+ *      entry, within node
+ * @height - height of node within the tree (leaves are 1, not 0)
+ * @pt_entry - Poiter to a PTE_t, stores the contents of the page table entry
+ * @vaddr_parent - The virtual address bits already translated in walking the
+ *                 page table to node.
+ * @vaddr_pte - Optional pointer to a variable storing the virtual address bits
+ *              translated by node[i].
+ */
+
+static void
+get_pte(CPUState *cs, hwaddr node, int i, int height,
+        PTE_t *pt_entry, target_ulong vaddr_parent, target_ulong *vaddr_pte)
+
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+    int32_t a20_mask = x86_get_a20_mask(env);
+    hwaddr pte;
+
+    if (env->hflags & HF_LMA_MASK) {
+        /* 64 bit */
+        int pte_width = 8;
+        pte = (node + (i * pte_width)) & a20_mask;
+        pt_entry->pte64_t = address_space_ldq(cs->as, pte,
+                                              MEMTXATTRS_UNSPECIFIED, NULL);
+    } else {
+        /* 32 bit */
+        int pte_width = 4;
+        pte = (node + (i * pte_width)) & a20_mask;
+        pt_entry->pte32_t = address_space_ldl(cs->as, pte,
+                                              MEMTXATTRS_UNSPECIFIED, NULL);
+    }
+
+    if (vaddr_pte) {
+        int shift = 0;
+
+        switch (height) {
+        case 5:
+            shift = 48;
+            break;
+        case 4:
+            shift = 39;
+            break;
+        case 3:
+            shift = 30;
+            break;
+        case 2:
+            /* 64 bit page tables shift from 30->21 bits here */
+            if (env->cr[4] & CR4_PAE_MASK) {
+                shift = 21;
+            } else {
+                /* 32 bit page tables shift from 32->22 bits */
+                shift = 22;
+            }
+            break;
+        default:
+            g_assert_not_reached();
+        }
+        *vaddr_pte = vaddr_parent | ((i & 0x1ffULL) << shift);
+    }
+}
+
+static bool
+_mmu_pte_check_bits(CPUState *cs, PTE_t *pte, int flag)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+    if (env->hflags & HF_LMA_MASK) {
+        return pte->pte64_t & flag;
+    } else {
+        return pte->pte32_t & flag;
+    }
+}
+
+/**
+ * mmu_pte_present - Return true if the pte is
+ *                   marked 'present'
+ */
+static bool
+mmu_pte_present(CPUState *cs, PTE_t *pte)
+{
+    return _mmu_pte_check_bits(cs, pte, PG_PRESENT_MASK);
+}
+
+/**
+ * mmu_pte_present - Return true if the pte is
+ *                   a page table leaf, false if
+ *                   the pte points to another
+ *                   node in the radix tree.
+ */
+
+static bool
+mmu_pte_leaf(CPUState *cs, PTE_t *pte)
+{
+    return _mmu_pte_check_bits(cs, pte, PG_PSE_MASK);
+}
+
+/**
+ * mmu_pte_child - Returns the physical address
+ *                 of a radix tree node pointed to by pte.
+ *
+ * @cs - CPU state
+ * @pte - The page table entry
+ * @height - The height in the tree of pte
+ *
+ * Returns the physical address stored in pte on success,
+ *     -1 on error.
+ */
+static hwaddr
+mmu_pte_child(CPUState *cs, PTE_t *pte, int height)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+    bool pae_enabled = env->cr[4] & CR4_PAE_MASK;
+    int32_t a20_mask = x86_get_a20_mask(env);
+    switch (height) {
+#ifdef TARGET_X86_64
+    case 5:
+        assert(env->cr[4] & CR4_LA57_MASK);
+    case 4:
+        assert(env->hflags & HF_LMA_MASK);
+        /* assert(pae_enabled); */
+        /* Fall through */
+#endif
+    case 3:
+        assert(pae_enabled);
+#ifdef TARGET_X86_64
+        if (env->hflags & HF_LMA_MASK) {
+            return (pte->pte64_t & PLM4_ADDR_MASK) & a20_mask;
+        } else
+#endif
+        {
+            return (pte->pte64_t & ~0xfff) & a20_mask;
+        }
+    case 2:
+    case 1:
+        if (pae_enabled) {
+            return (pte->pte64_t & PLM4_ADDR_MASK) & a20_mask;
+        } else {
+            return (pte->pte32_t & ~0xfff) & a20_mask;
+        }
+    default:
+        g_assert_not_reached();
+    }
+    return -1;
+}
+
+
+/**
+ ************** generic page table code ***********
+ */
+
+/**
+ * _for_each_pte - recursive helper function
+ *
+ * @cs - CPU state
+ * @fn(cs, data, pte, vaddr, height) - User-provided function to call on each
+ *                                     pte.
+ *   * @cs - pass through cs
+ *   * @data - user-provided, opaque pointer
+ *   * @pte - current pte
+ *   * @vaddr - virtual address translated by pte
+ *   * @height - height in the tree of pte
+ * @data - user-provided, opaque pointer, passed to fn()
+ * @visit_interior_nodes - if true, call fn() on page table entries in
+ *                         interior nodes.  If false, only call fn() on page
+ *                         table entries in leaves.
+ * @node - The physical address of the current page table radix tree node
+ * @vaddr - The virtual address bits translated in walking the page table to
+ *          node
+ * @height - The height of node in the radix tree
+ *
+ * height starts at the max and counts down.
+ * In a 4 level x86 page table, pml4e is level 4, pdpe is level 3,
+ *  pde is level 2, and pte is level 1
+ *
+ * Returns true on success, false on error.
+ */
+static bool
+_for_each_pte(CPUState *cs,
+              int (*fn)(CPUState *cs, void *data, PTE_t *pte,
+                        target_ulong vaddr, int height),
+              void *data, bool visit_interior_nodes, hwaddr node,
+              target_ulong vaddr, int height)
+{
+    int ptes_per_node = mmu_page_table_entries_per_node(cs, height);
+    int i;
+
+    for (i = 0; i < ptes_per_node; i++) {
+        PTE_t pt_entry;
+        target_ulong vaddr_i;
+        get_pte(cs, node, i, height, &pt_entry, vaddr, &vaddr_i);
+
+        if (mmu_pte_present(cs, &pt_entry)) {
+            if (height == 1 || mmu_pte_leaf(cs, &pt_entry)) {
+                if (fn(cs, data, &pt_entry, vaddr_i, height)) {
+                    /* Error */
+                    return false;
+                }
+            } else { /* Non-leaf */
+                if (visit_interior_nodes) {
+                    if (fn(cs, data, &pt_entry, vaddr_i, height)) {
+                        /* Error */
+                        return false;
+                    }
+                }
+                hwaddr child = mmu_pte_child(cs, &pt_entry, height);
+                assert(height);
+                if (!_for_each_pte(cs, fn, data, visit_interior_nodes,
+                                   child, height - 1, vaddr_i)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+/**
+ * for_each_pte - iterate over a page table, and
+ *                call fn on each entry
+ *
+ * @cs - CPU state
+ * @fn(cs, data, pte, vaddr, height) - User-provided function to call on each
+ *                                     pte.
+ *   * @cs - pass through cs
+ *   * @data - user-provided, opaque pointer
+ *   * @pte - current pte
+ *   * @vaddr - virtual address translated by pte
+ *   * @height - height in the tree of pte
+ * @data - opaque pointer; passed through to fn
+ * @visit_interior_nodes - if true, call fn() on interior entries in
+ *                         page table; if false, visit only leaf entries.
+ *
+ * Returns true on success, false on error.
+ *
+ */
+bool for_each_pte(CPUState *cs,
+                  int (*fn)(CPUState *cs, void *data, PTE_t *pte,
+                            target_ulong vaddr, int height),
+                  void *data, bool visit_interior_nodes)
+{
+    int height;
+    target_ulong vaddr;
+    hwaddr root;
 
     if (!cpu_paging_enabled(cs)) {
         /* paging is disabled */
         return true;
     }
 
-    a20_mask = x86_get_a20_mask(env);
-    if (env->cr[4] & CR4_PAE_MASK) {
-#ifdef TARGET_X86_64
-        if (env->hflags & HF_LMA_MASK) {
-            if (env->cr[4] & CR4_LA57_MASK) {
-                hwaddr pml5e_addr;
+    root = mmu_page_table_root(cs, &height, &vaddr);
 
-                pml5e_addr = (env->cr[3] & PLM4_ADDR_MASK) & a20_mask;
-                walk_pml5e(list, cs->as, pml5e_addr, a20_mask);
-            } else {
-                hwaddr pml4e_addr;
-
-                pml4e_addr = (env->cr[3] & PLM4_ADDR_MASK) & a20_mask;
-                walk_pml4e(list, cs->as, pml4e_addr, a20_mask,
-                        0xffffULL << 48);
-            }
-        } else
-#endif
-        {
-            hwaddr pdpe_addr;
-
-            pdpe_addr = (env->cr[3] & ~0x1f) & a20_mask;
-            walk_pdpe2(list, cs->as, pdpe_addr, a20_mask);
-        }
-    } else {
-        hwaddr pde_addr;
-        bool pse;
-
-        pde_addr = (env->cr[3] & ~0xfff) & a20_mask;
-        pse = !!(env->cr[4] & CR4_PSE_MASK);
-        walk_pde2(list, cs->as, pde_addr, a20_mask, pse);
-    }
-
-    return true;
+    /* Recursively call a helper to walk the page table */
+    return _for_each_pte(cs, fn, data, visit_interior_nodes, root, vaddr,
+                         height);
 }
 
+/**
+ * Back to x86 hooks
+ */
+
+struct memory_mapping_data {
+    MemoryMappingList *list;
+};
+
+
+static int add_memory_mapping_to_list(CPUState *cs, void *data, PTE_t *pte,
+                                      target_ulong vaddr, int height)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+
+    struct memory_mapping_data *mm_data = (struct memory_mapping_data *) data;
+
+    hwaddr start_paddr = 0;
+    size_t pg_size;
+    switch (height) {
+    case 1:
+        start_paddr = pte->pte64_t & ~0xfff;
+        if (env->cr[4] & CR4_PAE_MASK) {
+            start_paddr &= ~(0x1ULL << 63);
+        }
+        pg_size = 1 << 12;
+        break;
+    case 2:
+        if (env->cr[4] & CR4_PAE_MASK) {
+            pg_size = 1 << 21;
+            start_paddr = (pte->pte64_t & ~0x1fffff) & ~(0x1ULL << 63);
+        } else {
+            assert(!!(env->cr[4] & CR4_PSE_MASK));
+            /*
+             * 4 MB page:
+             * bits 39:32 are bits 20:13 of the PDE
+             * bit3 31:22 are bits 31:22 of the PDE
+             */
+            hwaddr high_paddr = ((hwaddr)(pte->pte64_t & 0x1fe000) << 19);
+            start_paddr = (pte->pte64_t & ~0x3fffff) | high_paddr;
+            pg_size = 1 << 22;
+        }
+        break;
+    case 3:
+        pg_size = 1 << 30;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    /* This hook skips mappings for the I/O region */
+    if (cpu_physical_memory_is_io(start_paddr)) {
+        /* I/O region */
+        return 0;
+    }
+
+    memory_mapping_list_add_merge_sorted(mm_data->list, start_paddr,
+                                         vaddr, pg_size);
+    return 0;
+}
+
+bool x86_cpu_get_memory_mapping(CPUState *cs, MemoryMappingList *list,
+                                Error **errp)
+{
+    return for_each_pte(cs, &add_memory_mapping_to_list, list, false);
+}

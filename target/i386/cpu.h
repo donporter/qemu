@@ -2121,6 +2121,11 @@ typedef struct X86PTETranslate {
     hwaddr gaddr;
 } X86PTETranslate;
 
+/* Intended to become a generic PTE type */
+typedef union PTE {
+    uint64_t pte64_t;
+    uint32_t pte32_t;
+} PTE_t;
 
 #ifndef CONFIG_USER_ONLY
 extern const VMStateDescription vmstate_x86_cpu;
@@ -2136,6 +2141,12 @@ int x86_cpu_write_elf64_qemunote(WriteCoreDumpFunction f, CPUState *cpu,
                                  DumpState *s);
 int x86_cpu_write_elf32_qemunote(WriteCoreDumpFunction f, CPUState *cpu,
                                  DumpState *s);
+
+
+bool for_each_pte(CPUState *cs,
+                  int (*fn)(CPUState *cs, void *data, PTE_t *pte,
+                            target_ulong vaddr, int height),
+                  void *data, bool visit_interior_nodes);
 
 bool x86_cpu_get_memory_mapping(CPUState *cpu, MemoryMappingList *list,
                                 Error **errp);
