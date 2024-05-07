@@ -76,7 +76,6 @@ hwaddr mmu_page_table_root(CPUState *cs, int *height)
  *
  * Returns a value greater than zero on success, -1 on error.
  */
-static
 int mmu_page_table_entries_per_node(CPUState *cs, int height)
 {
     X86CPU *cpu = X86_CPU(cs);
@@ -113,6 +112,51 @@ int mmu_page_table_entries_per_node(CPUState *cs, int height)
     }
     return -1;
 }
+
+/**
+ * mmu_pte_leaf_page_size - Return the page size of a leaf entry,
+ *                          given the height and CPU state
+ *
+ * @cs - CPU state
+ * @height - height of the page table tree to query, where the leaves
+ *          are 1.
+ *
+ * Returns a value greater than zero on success, -1 on error.
+ */
+target_ulong mmu_pte_leaf_page_size(CPUState *cs, int height)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+    bool pae_enabled = env->cr[4] & CR4_PAE_MASK;
+
+    assert(height < 6);
+    assert(height > 0);
+
+    switch (height) {
+#ifdef TARGET_X86_64
+    case 5:
+        return 1ULL << 48;
+    case 4:
+        assert(env->hflags & HF_LMA_MASK);
+        return 1ULL << 39;
+#endif
+    case 3:
+        assert(pae_enabled);
+        return 1 << 30;
+    case 2:
+        if (pae_enabled) {
+            return 1 << 21;
+        } else {
+            return 1 << 22;
+        }
+    case 1:
+        return 4096;
+    default:
+        g_assert_not_reached();
+    }
+    return -1;
+}
+
 
 /**
  * get_pte - Copy the contents of the page table entry at node[i] into pt_entry.
@@ -307,7 +351,7 @@ mmu_pte_child(CPUState *cs, PTE_t *pte, int height)
 static bool
 _for_each_pte(CPUState *cs,
               int (*fn)(CPUState *cs, void *data, PTE_t *pte,
-                        target_ulong vaddr, int height),
+                        target_ulong vaddr, int height, int offset),
               void *data, bool visit_interior_nodes,
               bool visit_not_present, hwaddr node,
               target_ulong vaddr, int height)
@@ -329,13 +373,13 @@ _for_each_pte(CPUState *cs,
 
         if (pte_present || visit_not_present) {
             if ((!pte_present) || mmu_pte_leaf(cs, height, &pt_entry)) {
-                if (fn(cs, data, &pt_entry, vaddr_i, height)) {
+                if (fn(cs, data, &pt_entry, vaddr_i, height, i)) {
                     /* Error */
                     return false;
                 }
             } else { /* Non-leaf */
                 if (visit_interior_nodes) {
-                    if (fn(cs, data, &pt_entry, vaddr_i, height)) {
+                    if (fn(cs, data, &pt_entry, vaddr_i, height, i)) {
                         /* Error */
                         return false;
                     }
@@ -377,7 +421,7 @@ _for_each_pte(CPUState *cs,
  */
 bool for_each_pte(CPUState *cs,
                   int (*fn)(CPUState *cs, void *data, PTE_t *pte,
-                            target_ulong vaddr, int height),
+                            target_ulong vaddr, int height, int offset),
                   void *data, bool visit_interior_nodes,
                   bool visit_not_present)
 {
@@ -409,7 +453,8 @@ struct memory_mapping_data {
 
 
 static int add_memory_mapping_to_list(CPUState *cs, void *data, PTE_t *pte,
-                                      target_ulong vaddr, int height)
+                                      target_ulong vaddr, int height,
+                                      int offset)
 {
     X86CPU *cpu = X86_CPU(cs);
     CPUX86State *env = &cpu->env;

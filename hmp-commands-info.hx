@@ -239,6 +239,21 @@ SRST
     Show the active virtual memory mappings.
 ERST
 
+#if defined(TARGET_I386)
+    {
+        .name       = "pg",
+        .args_type  = "",
+        .params     = "",
+        .help       = "show the page table",
+        .cmd        = hmp_info_pg,
+    },
+#endif
+
+SRST                                                                               |
+  ``info pg``                                                                      |
+    Show the active page table.                                                    |
+ERST
+
     {
         .name       = "mtree",
         .args_type  = "flatview:-f,dispatch_tree:-d,owner:-o,disabled:-D",

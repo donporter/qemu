@@ -2142,12 +2142,14 @@ int x86_cpu_write_elf64_qemunote(WriteCoreDumpFunction f, CPUState *cpu,
 int x86_cpu_write_elf32_qemunote(WriteCoreDumpFunction f, CPUState *cpu,
                                  DumpState *s);
 
+target_ulong mmu_pte_leaf_page_size(CPUState *cs, int height);
 bool mmu_pte_leaf(CPUState *cs, int height, PTE_t *pte);
 bool mmu_pte_present(CPUState *cs, PTE_t *pte);
 hwaddr mmu_pte_child(CPUState *cs, PTE_t *pte, int height);
+int mmu_page_table_entries_per_node(CPUState *cs, int height);
 bool for_each_pte(CPUState *cs,
                   int (*fn)(CPUState *cs, void *data, PTE_t *pte,
-                            target_ulong vaddr, int height),
+                            target_ulong vaddr, int height, int offset),
                   void *data, bool visit_interior_nodes,
                   bool visit_not_present);
 
