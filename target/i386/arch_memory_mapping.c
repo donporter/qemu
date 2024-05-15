@@ -33,12 +33,18 @@
  * Returns a hardware address on success.  Should not fail (i.e., caller is
  * responsible to ensure that a page table is actually present).
  */
-static
 hwaddr mmu_page_table_root(CPUState *cs, int *height)
 {
     X86CPU *cpu = X86_CPU(cs);
     CPUX86State *env = &cpu->env;
-    int32_t a20_mask;
+    /*
+     * DEP 5/15/24: Some original page table walking code sets the a20
+     * mask as a 32 bit integer and checks it on each level of hte
+     * page table walk; some only checks it against the final result.
+     * For 64 bits, I think we need to sign extend in the common case
+     * it is not set (and returns -1), or we will lose bits.
+     */
+    int64_t a20_mask;
 
     assert(cpu_paging_enabled(cs));
     a20_mask = x86_get_a20_mask(env);
@@ -157,6 +163,68 @@ target_ulong mmu_pte_leaf_page_size(CPUState *cs, int height)
     return -1;
 }
 
+/**
+ * mmu_virtual_to_pte_index - Given a virtual address and height in the
+ *       page table radix tree, return the index that should be used
+ *       to look up the next page table entry (pte) in translating an
+ *       address.
+ *
+ * @cs - CPU state
+ * @vaddr - The virtual address to translate
+ * @height - height of node within the tree (leaves are 1, not 0).
+ *
+ * Example: In 32-bit x86 page tables, the virtual address is split
+ * into 10 bits at height 2, 10 bits at height 1, and 12 offset bits.
+ * So a call with VA and height 2 would return the first 10 bits of va,
+ * right shifted by 22.
+ */
+
+int mmu_virtual_to_pte_index(CPUState *cs, target_ulong vaddr, int height)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+    int shift = 0;
+    int mask = 0;
+
+    switch (height) {
+    case 5:
+        shift = 48;
+        mask = 0x1ff;
+        break;
+    case 4:
+        shift = 39;
+        mask = 0x1ff;
+        break;
+    case 3:
+        shift = 30;
+        mask = 0x1ff;
+        break;
+    case 2:
+        /* 64 bit page tables shift from 30->21 bits here */
+        if (env->cr[4] & CR4_PAE_MASK) {
+            shift = 21;
+            mask = 0x1ff;
+        } else {
+            /* 32 bit page tables shift from 32->22 bits */
+            shift = 22;
+            mask = 0x3ff;
+        }
+        break;
+    case 1:
+        shift = 12;
+        if (env->cr[4] & CR4_PAE_MASK) {
+            mask = 0x1ff;
+        } else {
+            mask = 0x3ff;
+        }
+
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    return (vaddr >> shift) & mask;
+}
 
 /**
  * get_pte - Copy the contents of the page table entry at node[i] into pt_entry.
@@ -170,14 +238,17 @@ target_ulong mmu_pte_leaf_page_size(CPUState *cs, int height)
  * @height - height of node within the tree (leaves are 1, not 0)
  * @pt_entry - Poiter to a PTE_t, stores the contents of the page table entry
  * @vaddr_parent - The virtual address bits already translated in walking the
- *                 page table to node.
+ *                 page table to node.  Optional: only used if vaddr_pte is set.
  * @vaddr_pte - Optional pointer to a variable storing the virtual address bits
  *              translated by node[i].
+ * @pte_paddr - Pointer to the physical address of the PTE within node.
+ *              Optional parameter.
  */
 
-static void
+void
 get_pte(CPUState *cs, hwaddr node, int i, int height,
-        PTE_t *pt_entry, target_ulong vaddr_parent, target_ulong *vaddr_pte)
+        PTE_t *pt_entry, target_ulong vaddr_parent, target_ulong *vaddr_pte,
+        hwaddr *pte_paddr)
 
 {
     X86CPU *cpu = X86_CPU(cs);
@@ -200,6 +271,7 @@ get_pte(CPUState *cs, hwaddr node, int i, int height,
     }
 
     if (vaddr_pte) {
+        /* XXX: Maybe consolidate with virtual_to_pte_index */
         int shift = 0;
 
         switch (height) {
@@ -227,19 +299,24 @@ get_pte(CPUState *cs, hwaddr node, int i, int height,
         default:
             g_assert_not_reached();
         }
+
         *vaddr_pte = vaddr_parent | ((i & 0x1ffULL) << shift);
+    }
+
+    if (pte_paddr) {
+        *pte_paddr = pte;
     }
 }
 
-static bool
-_mmu_pte_check_bits(CPUState *cs, PTE_t *pte, int flag)
+bool
+mmu_pte_check_bits(CPUState *cs, PTE_t *pte, int64_t mask)
 {
     X86CPU *cpu = X86_CPU(cs);
     CPUX86State *env = &cpu->env;
     if (env->hflags & HF_LMA_MASK) {
-        return pte->pte64_t & flag;
+        return pte->pte64_t & mask;
     } else {
-        return pte->pte32_t & flag;
+        return pte->pte32_t & mask;
     }
 }
 
@@ -250,7 +327,7 @@ _mmu_pte_check_bits(CPUState *cs, PTE_t *pte, int flag)
 bool
 mmu_pte_present(CPUState *cs, PTE_t *pte)
 {
-    return _mmu_pte_check_bits(cs, pte, PG_PRESENT_MASK);
+    return mmu_pte_check_bits(cs, pte, PG_PRESENT_MASK);
 }
 
 /**
@@ -262,7 +339,7 @@ mmu_pte_present(CPUState *cs, PTE_t *pte)
 bool
 mmu_pte_leaf(CPUState *cs, int height, PTE_t *pte)
 {
-    return height == 1 || _mmu_pte_check_bits(cs, pte, PG_PSE_MASK);
+    return height == 1 || mmu_pte_check_bits(cs, pte, PG_PSE_MASK);
 }
 
 /**
@@ -283,6 +360,7 @@ mmu_pte_child(CPUState *cs, PTE_t *pte, int height)
     CPUX86State *env = &cpu->env;
     bool pae_enabled = env->cr[4] & CR4_PAE_MASK;
     int32_t a20_mask = x86_get_a20_mask(env);
+
     switch (height) {
 #ifdef TARGET_X86_64
     case 5:
@@ -296,7 +374,7 @@ mmu_pte_child(CPUState *cs, PTE_t *pte, int height)
         assert(pae_enabled);
 #ifdef TARGET_X86_64
         if (env->hflags & HF_LMA_MASK) {
-            return (pte->pte64_t & PLM4_ADDR_MASK) & a20_mask;
+            return (pte->pte64_t & PG_ADDRESS_MASK) & a20_mask;
         } else
 #endif
         {
@@ -305,7 +383,7 @@ mmu_pte_child(CPUState *cs, PTE_t *pte, int height)
     case 2:
     case 1:
         if (pae_enabled) {
-            return (pte->pte64_t & PLM4_ADDR_MASK) & a20_mask;
+            return (pte->pte64_t & PG_ADDRESS_MASK) & a20_mask;
         } else {
             return (pte->pte32_t & ~0xfff) & a20_mask;
         }
@@ -368,7 +446,7 @@ _for_each_pte(CPUState *cs,
         target_ulong vaddr_i;
         bool pte_present;
 
-        get_pte(cs, node, i, height, &pt_entry, vaddr, &vaddr_i);
+        get_pte(cs, node, i, height, &pt_entry, vaddr, &vaddr_i, NULL);
         pte_present = mmu_pte_present(cs, &pt_entry);
 
         if (pte_present || visit_not_present) {
