@@ -34,6 +34,41 @@
 #include "qapi/qapi-commands-misc-target.h"
 #include "qapi/qapi-commands-misc.h"
 
+/* Maximum x86 height */
+#define MAX_HEIGHT 5
+
+struct mem_print_state {
+    Monitor *mon;
+    CPUArchState *env;
+    int vaw, paw; /* VA and PA width in characters */
+    int max_height;
+    bool (*flusher)(CPUState *cs, struct mem_print_state *state);
+    bool flush_interior; /* If false, only call flusher() on leaves */
+    bool require_physical_contiguity;
+    /*
+     * For compressing contiguous ranges, track the
+     * start and end of the range
+     */
+    hwaddr vstart[MAX_HEIGHT + 1]; /* Starting virt. addr. of open pte range */
+    hwaddr vend[MAX_HEIGHT + 1]; /* Ending virtual address of open pte range */
+    hwaddr pstart; /* Starting physical address of open pte range */
+    hwaddr pend; /* Ending physical address of open pte range */
+    int64_t ent[MAX_HEIGHT + 1]; /* PTE contents on current root->leaf path */
+    int offset[MAX_HEIGHT + 1]; /* PTE range starting offsets */
+    int last_offset[MAX_HEIGHT + 1]; /* PTE range ending offsets */
+    int start_height; /*
+                       * The height at which we started accumulating ranges,
+                       * i.e., the next height we need to print once we hit
+                       * the end of a contiguous range.
+                       */
+    int prot[MAX_HEIGHT + 1];
+};
+
+/********************* x86 specific hooks for printing page table stuff ****/
+
+const char *names[7] = {(char *)NULL, "PTE", "PDE", "PDP", "PML4", "Pml5",
+                        (char *)NULL};
+
 /* Perform linear address sign extension */
 static hwaddr addr_canonical(CPUArchState *env, hwaddr addr)
 {
@@ -51,41 +86,10 @@ static hwaddr addr_canonical(CPUArchState *env, hwaddr addr)
     return addr;
 }
 
-/* Maximum x86 height */
-#define MAX_HEIGHT 5
-
-struct mem_print_state {
-    Monitor *mon;
-    CPUArchState *env;
-    int vaw, paw; /* VA and PA width in characters */
-    int max_height;
-    /*
-     * For compressing contiguous ranges, track the
-     * start and end of the range
-     */
-    hwaddr vstart[MAX_HEIGHT + 1]; /* Starting virt. addr. of open pte range */
-    hwaddr vend[MAX_HEIGHT + 1]; /* Ending virtual address of open pte range */
-    hwaddr pstart; /* Starting physical address of open pte range */
-    hwaddr pend; /* Ending physical address of open pte range */
-    int64_t ent[MAX_HEIGHT + 1];
-    int offset[MAX_HEIGHT + 1];
-    int last_offset[MAX_HEIGHT + 1];
-    int start_height; /*
-                       * The height at which we started accumulating ranges,
-                       * i.e., the next height we need to print once we hit
-                       * the end of a contiguous range.
-                       */
-    int prot[MAX_HEIGHT + 1];
-};
-
-const char *names[7] = {(char *)NULL, "PTE", "PDE", "PDP", "PML4", "Pml5",
-                        (char *)NULL};
-
-static char *pg_bits(uint64_t ent)
+static char *pg_bits(hwaddr ent)
 {
     static char buf[32];
     sprintf(buf, "%c%c%c%c%c%c%c%c%c%c",
-            /* TODO: Some of these change depending on level */
             ent & PG_NX_MASK ? 'X' : '-',
             ent & PG_GLOBAL_MASK ? 'G' : '-',
             ent & PG_PSE_MASK ? 'S' : '-',
@@ -98,6 +102,69 @@ static char *pg_bits(uint64_t ent)
             ent & PG_PRESENT_MASK ? 'P' : '-');
     return buf;
 }
+
+static bool init_iterator(Monitor *mon, struct mem_print_state *state)
+{
+    CPUArchState *env;
+    state->mon = mon;
+    state->flush_interior = false;
+    state->require_physical_contiguity = false;
+
+    for (int i = 0; i < MAX_HEIGHT; i++) {
+        state->vstart[i] = -1;
+        state->prot[i] = 0;
+        state->last_offset[i] = 0;
+    }
+    state->start_height = 0;
+
+    env = mon_get_cpu_env(mon);
+    if (!env) {
+        monitor_printf(mon, "No CPU available\n");
+        return false;
+    }
+    state->env = env;
+
+    if (!(env->cr[0] & CR0_PG_MASK)) {
+        monitor_printf(mon, "PG disabled\n");
+        return false;
+    }
+
+    /* set va and pa width */
+    if (env->cr[4] & CR4_PAE_MASK) {
+        state->paw = 13;
+#ifdef TARGET_X86_64
+        if (env->hflags & HF_LMA_MASK) {
+            if (env->cr[4] & CR4_LA57_MASK) {
+                state->vaw = 15;
+                state->max_height = 5;
+            } else {
+                state->vaw = 12;
+                state->max_height = 4;
+            }
+        } else
+#endif
+        {
+            state->vaw = 8;
+            state->max_height = 3;
+        }
+    } else {
+        state->max_height = 2;
+        state->vaw = 8;
+        state->paw = 8;
+    }
+
+    return true;
+}
+
+static void pg_print_header(Monitor *mon, struct mem_print_state *state)
+{
+    /* Header line */
+    monitor_printf(mon, "%-*s %-13s %-10s %*s%s\n",
+                   3 + 2 * (state->vaw - 3), "VPN range",
+                   "Entry", "Flags",
+                   2 * (state->max_height - 1), "", "Physical page(s)");
+}
+
 
 static void pg_print(CPUState *cs, Monitor *mon, uint64_t pt_ent,
                      target_ulong vaddr_s, target_ulong vaddr_l,
@@ -158,8 +225,8 @@ int ent2prot(uint64_t prot)
                    PG_PRESENT_MASK);
 }
 
-/* Returns true if it omitted anything */
-static inline
+/* Returns true if it emitted anything */
+static
 bool flush_print_pg_state(CPUState *cs, struct mem_print_state *state)
 {
     bool ret = false;
@@ -176,20 +243,17 @@ bool flush_print_pg_state(CPUState *cs, struct mem_print_state *state)
                  state->offset[i], state->last_offset[i],
                  i, state->max_height, state->vaw, state->paw,
                  mmu_pte_leaf(cs, i, &my_pte));
-
-        state->ent[i] = 0;
-        state->last_offset[i] = 0;
-        state->vstart[i] = -1;
     }
-    state->pstart = -1;
-    state->start_height = 0;
+
     return ret;
 }
 
+/*************************** Start generic page table monitor code *********/
+
 /* Assume only called on present entries */
 static
-int mem_print_pg(CPUState *cs, void *data, PTE_t *pte,
-                 target_ulong vaddr, int height, int offset)
+int compressing_iterator(CPUState *cs, void *data, PTE_t *pte,
+                         target_ulong vaddr, int height, int offset)
 {
     struct mem_print_state *state = (struct mem_print_state *) data;
     hwaddr paddr = mmu_pte_child(cs, pte, height);
@@ -202,13 +266,25 @@ int mem_print_pg(CPUState *cs, void *data, PTE_t *pte,
     /* Prot of current pte */
     int prot = ent2prot(pte->pte64_t);
 
-    /* If this is the very first call, save the height of the tree */
-    if (state->max_height == -1) {
-        state->max_height = height;
-    }
 
     /* If there is a prior run, first try to extend it. */
     if (state->start_height != 0) {
+
+        /*
+         * If we aren't flushing interior nodes, raise the start height.
+         * We don't need to detect non-compressible interior nodes.
+         */
+        if ((!state->flush_interior) && state->start_height < height) {
+            state->start_height = height;
+            state->vstart[height] = vaddr;
+            state->vend[height] = vaddr;
+            state->ent[height] = pte->pte64_t;
+            if (offset == 0) {
+                state->last_offset[height] = entries_per_node - 1;
+            } else {
+                state->last_offset[height] = offset - 1;
+            }
+        }
 
         /* Detect when we are walking down the "left edge" of a range */
         if (state->vstart[height] == -1
@@ -227,12 +303,15 @@ int mem_print_pg(CPUState *cs, void *data, PTE_t *pte,
             }
 
             /* Detect contiguous entries at same level */
-        } else if (state->vstart[height] != -1
+        } else if ((state->vstart[height] != -1)
+                   && (state->start_height >= height)
                    && ent2prot(state->ent[height]) == prot
-                   && state->start_height >= height
                    && (((state->last_offset[height] + 1) % entries_per_node)
                        == offset)
-                   && ((!is_leaf) || state->pend + size == paddr)) {
+                   && ((!is_leaf)
+                       || (!state->require_physical_contiguity)
+                       || (state->pend + size == paddr))) {
+
 
             /*
              * If there are entries at the levels below, make sure we
@@ -278,8 +357,18 @@ int mem_print_pg(CPUState *cs, void *data, PTE_t *pte,
             /*
              * We hit dicontiguous permissions or pages.
              * Print the old entries, then start accumulating again
+             *
+             * Some clients only want the flusher called on a leaf.
+             * Check that too.
+             *
+             * We can infer whether the accumulated range includes a
+             * leaf based on whether pstart is -1.
              */
-            if (flush_print_pg_state(cs, state)) {
+            if (state->flush_interior || (state->pstart != -1)) {
+                if (state->flusher(cs, state)) {
+                    start_new_run = true;
+                }
+            } else {
                 start_new_run = true;
             }
         }
@@ -289,6 +378,14 @@ int mem_print_pg(CPUState *cs, void *data, PTE_t *pte,
 
     if (start_new_run) {
         /* start a new run with this PTE */
+        for (int i = state->start_height; i > 0; i--) {
+            if (state->vstart[i] != -1) {
+                state->ent[i] = 0;
+                state->last_offset[i] = 0;
+                state->vstart[i] = -1;
+            }
+        }
+        state->pstart = -1;
         state->vstart[height] = vaddr;
         state->vend[height] = vaddr;
         state->ent[height] = pte->pte64_t;
@@ -307,75 +404,28 @@ int mem_print_pg(CPUState *cs, void *data, PTE_t *pte,
 
 void hmp_info_pg(Monitor *mon, const QDict *qdict)
 {
-    CPUArchState *env;
-    CPUState *cs;
     struct mem_print_state state;
-    int levels = 0;
 
-    state.mon = mon;
-
-    for (int i = 0; i < MAX_HEIGHT; i++) {
-        state.vstart[i] = -1;
-        state.prot[i] = 0;
-        state.last_offset[i] = 0;
-    }
-    state.max_height = -1;
-    state.start_height = 0;
-
-    env = mon_get_cpu_env(mon);
-    if (!env) {
-        monitor_printf(mon, "No CPU available\n");
-        return;
-    }
-    state.env = env;
-
-    cs = mon_get_cpu(mon);
+    CPUState *cs = mon_get_cpu(mon);
     if (!cs) {
         monitor_printf(mon, "Unable to get CPUState.  Internal error\n");
         return;
     }
 
-    if (!(env->cr[0] & CR0_PG_MASK)) {
-        monitor_printf(mon, "PG disabled\n");
+    if (!init_iterator(mon, &state)) {
         return;
     }
+    state.flush_interior = true;
+    state.require_physical_contiguity = true;
+    state.flusher = &flush_print_pg_state;
 
-    /* set va and pa width */
-    if (env->cr[4] & CR4_PAE_MASK) {
-        state.paw = 13;
-#ifdef TARGET_X86_64
-        if (env->hflags & HF_LMA_MASK) {
-            if (env->cr[4] & CR4_LA57_MASK) {
-                state.vaw = 15;
-                levels = 5;
-            } else {
-                state.vaw = 12;
-                levels = 4;
-            }
-        } else
-#endif
-        {
-            state.vaw = 8;
-            levels = 3;
-        }
-    } else {
-        levels = 2;
-        state.vaw = 8;
-        state.paw = 8;
-    }
+    pg_print_header(mon, &state);
 
-
-    /* Header line */
-    monitor_printf(mon, "%-*s %-13s %-10s %*s%s\n",
-                   3 + 2 * (state.vaw - 3), "VPN range",
-                   "Entry", "Flags",
-                   2 * (levels - 1), "", "Physical page(s)");
-
-    /**
+    /*
      * We must visit interior entries to get the hierarchy, but
      * can skip not present mappings
      */
-    for_each_pte(cs, &mem_print_pg, &state, true, false);
+    for_each_pte(cs, &compressing_iterator, &state, true, false);
 
     /* Print last entry, if one present */
     flush_print_pg_state(cs, &state);
@@ -384,96 +434,46 @@ void hmp_info_pg(Monitor *mon, const QDict *qdict)
 
 
 static void print_pte(Monitor *mon, CPUArchState *env, hwaddr addr,
-                      hwaddr pte, hwaddr mask)
+                      hwaddr pte)
 {
+    char buf[128];
+    char *pos = buf;
+
     addr = addr_canonical(env, addr);
 
-    monitor_printf(mon, HWADDR_FMT_plx ": " HWADDR_FMT_plx
-                   " %c%c%c%c%c%c%c%c%c\n",
-                   addr,
-                   pte & mask,
-                   pte & PG_NX_MASK ? 'X' : '-',
-                   pte & PG_GLOBAL_MASK ? 'G' : '-',
-                   pte & PG_PSE_MASK ? 'P' : '-',
-                   pte & PG_DIRTY_MASK ? 'D' : '-',
-                   pte & PG_ACCESSED_MASK ? 'A' : '-',
-                   pte & PG_PCD_MASK ? 'C' : '-',
-                   pte & PG_PWT_MASK ? 'T' : '-',
-                   pte & PG_USER_MASK ? 'U' : '-',
-                   pte & PG_RW_MASK ? 'W' : '-');
-}
+    pos += sprintf(pos, HWADDR_FMT_plx ": " HWADDR_FMT_plx " ", addr,
+                   (hwaddr) (pte & PG_ADDRESS_MASK));
 
-struct tlb_print_state {
-    Monitor *mon;
-    CPUArchState *env;
-};
+    pos += sprintf(pos, " %s", pg_bits(pte));
+
+    /* Trim line to fit screen */
+    if (pos - buf > 79) {
+        strcpy(buf + 77, "..");
+    }
+
+    monitor_printf(mon, "%s\n", buf);
+}
 
 static
 int mem_print_tlb(CPUState *cs, void *data, PTE_t *pte,
                   target_ulong vaddr, int height, int offset)
 {
-    struct tlb_print_state *state = (struct tlb_print_state *) data;
-    bool pae_enabled = state->env->cr[4] & CR4_PAE_MASK;
-#ifdef TARGET_X86_64
-    bool long_mode_enabled = state->env->hflags & HF_LMA_MASK;
-#endif
-    hwaddr mask = 0;
-    switch (height) {
-#ifdef TARGET_X86_64
-    case 5:
-        assert(state->env->cr[4] & CR4_LA57_MASK);
-        g_assert_not_reached();
-    case 4:
-        assert(long_mode_enabled);
-        g_assert_not_reached();
-#endif
-    case 3:
-        assert(pae_enabled);
-#ifdef TARGET_X86_64
-        if (long_mode_enabled) {
-            mask = 0x3ffffc0000000ULL;
-        } else
-#endif
-        {
-            mask = ~((hwaddr)(1 << 20) - 1);
-        }
-        break;
-    case 2:
-        mask = 0x3ffffffe00000ULL;
-        break;
-    case 1:
-        mask = 0x3fffffffff000ULL;
-        break;
-    default:
-            g_assert_not_reached();
-    }
-
-    print_pte(state->mon, state->env, vaddr, pte->pte64_t, mask);
+    struct mem_print_state *state = (struct mem_print_state *) data;
+    print_pte(state->mon, state->env, vaddr, pte->pte64_t);
     return 0;
 }
 
 void hmp_info_tlb(Monitor *mon, const QDict *qdict)
 {
-    CPUState *cs;
-    CPUArchState *env;
-    struct tlb_print_state state;
-    state.mon = mon;
+    struct mem_print_state state;
 
-    env = mon_get_cpu_env(mon);
-    if (!env) {
-        monitor_printf(mon, "No CPU available\n");
-        return;
-    }
-    state.env = env;
-
-    cs = mon_get_cpu(mon);
+    CPUState *cs = mon_get_cpu(mon);
     if (!cs) {
         monitor_printf(mon, "Unable to get CPUState.  Internal error\n");
         return;
     }
 
-    if (!(env->cr[0] & CR0_PG_MASK)) {
-        monitor_printf(mon, "PG disabled\n");
+    if (!init_iterator(mon, &state)) {
         return;
     }
 
@@ -485,97 +485,44 @@ void hmp_info_tlb(Monitor *mon, const QDict *qdict)
 }
 
 static
-void mem_print(Monitor *mon, CPUArchState *env,
-                      hwaddr *vstart,
-                      hwaddr end, int prot)
+bool mem_print(CPUState *cs, struct mem_print_state *state)
 {
-    monitor_printf(mon, HWADDR_FMT_plx "-" HWADDR_FMT_plx " "
+    CPUArchState *env = state->env;
+    int i = 0;
+
+    /* We need to figure out the lowest populated level */
+    for ( ; i < state->max_height; i++) {
+        if (state->vstart[i] != -1) {
+            break;
+        }
+    }
+
+    hwaddr vstart = state->vstart[i];
+    hwaddr end = state->vend[i] + mmu_pte_leaf_page_size(cs, i);
+    int prot = ent2prot(state->ent[i]);
+
+
+    monitor_printf(state->mon, HWADDR_FMT_plx "-" HWADDR_FMT_plx " "
                    HWADDR_FMT_plx " %c%c%c\n",
-                   addr_canonical(env, *vstart),
+                   addr_canonical(env, vstart),
                    addr_canonical(env, end),
-                   addr_canonical(env, end - *vstart),
+                   addr_canonical(env, end - vstart),
                    prot & PG_USER_MASK ? 'u' : '-',
                    'r',
                    prot & PG_RW_MASK ? 'w' : '-');
+    return true;
 }
 
-static
-int mem_print_pte(CPUState *cs, void *data, PTE_t *pte,
-                  target_ulong vaddr, int height, int offset)
-{
-    struct mem_print_state *state = (struct mem_print_state *) data;
-
-    /* If this is the very first call, save the height of the tree */
-    if (state->max_height == -1) {
-        state->max_height = height;
-    }
-
-    int prot = 0;
-    int last_prot = state->prot[height];
-    bool present = mmu_pte_present(cs, pte);
-    if (present) {
-
-        /* Prot of current pte */
-        prot = pte->pte64_t & (PG_USER_MASK | PG_RW_MASK |
-                               PG_PRESENT_MASK);
-        /* Save the protection bits for later use */
-        state->prot[height] = prot;
-
-        for (int i = height + 1; i <= state->max_height; i++) {
-            prot &= state->prot[i];
-        }
-    }
-
-    /**
-     * If there is state from a previous entry and the current entry
-     * is not present or discontiguous, flush what we have accumulated.
-     */
-    target_ulong size = mmu_pte_leaf_page_size(cs, height);
-    if (state->vstart[height] != -1) {
-        if ((!present) || prot != last_prot) {
-            mem_print(state->mon, state->env, &state->vstart[height],
-                      state->vend[height], last_prot);
-
-            state->vstart[height] = -1;
-            state->vend[height] = -1;
-        } else {
-
-            state->vend[height] = vaddr + size;
-        }
-    }
-
-    state->ent[height] = pte->pte64_t;
-
-    /* If we are a leaf and no run started, start one */
-    if (present && (state->vstart[height] == -1)
-        && mmu_pte_leaf(cs, height, pte)) {
-        state->vstart[height] = vaddr;
-        state->vend[height] = vaddr + size;
-    }
-
-    return 0;
-}
 
 void hmp_info_mem(Monitor *mon, const QDict *qdict)
 {
-    CPUArchState *env;
     CPUState *cs;
     struct mem_print_state state;
-    state.mon = mon;
 
-    for (int i = 0; i < MAX_HEIGHT; i++) {
-        state.ent[i] = 0;
-        state.vstart[i] = -1;
-    }
-
-    state.max_height = -1;
-
-    env = mon_get_cpu_env(mon);
-    if (!env) {
-        monitor_printf(mon, "No CPU available\n");
+    if (!init_iterator(mon, &state)) {
         return;
     }
-    state.env = env;
+    state.flusher = mem_print;
 
     cs = mon_get_cpu(mon);
     if (!cs) {
@@ -583,29 +530,13 @@ void hmp_info_mem(Monitor *mon, const QDict *qdict)
         return;
     }
 
-    if (!(env->cr[0] & CR0_PG_MASK)) {
-        monitor_printf(mon, "PG disabled\n");
-        return;
-    }
-
     /**
-     * We must visit not-present entries and interior entries
-     * to update prot
+     * We must visit interior entries to update prot
      */
-    for_each_pte(cs, &mem_print_pte, &state, true, true);
+    for_each_pte(cs, &compressing_iterator, &state, true, false);
 
-    /* Flush last range; detect where the leaf level is bottom-up */
-    bool printed = false;
-    if (state.max_height != -1) {
-        for (int i = 1; i <= state.max_height && !printed; i++) {
-            if (state.vstart[i] != -1) {
-
-                mem_print(mon, env, &state.vstart[i],
-                          state.vend[i], state.prot[i]);
-                printed = true;
-            }
-        }
-    }
+    /* Flush the last entry, if needed */
+    mem_print(cs, &state);
 }
 
 void hmp_mce(Monitor *mon, const QDict *qdict)
