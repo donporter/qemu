@@ -186,6 +186,16 @@ typedef struct SysemuCPUOps {
     void (*mon_print_pte) (GString *buf, CPUArchState *env, hwaddr addr,
                            hwaddr pte, uint64_t prot);
 
+    /**
+     * @mon_print_mem: Hook called by the monitor to print a range
+     * of memory mappings in 'info mem'
+     */
+    bool (*mon_print_mem)(CPUState *cs, struct mem_print_state *state);
+
 } SysemuCPUOps;
+
+int compressing_iterator(CPUState *cs, void *data, DecodedPTE *pte,
+                         int height, int offset,
+                         const PageTableLayout *layout);
 
 #endif /* SYSEMU_CPU_OPS_H */
