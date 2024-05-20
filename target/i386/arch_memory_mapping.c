@@ -163,6 +163,65 @@ target_ulong mmu_pte_leaf_page_size(CPUState *cs, int height)
     return -1;
 }
 
+/*
+ * Given a CPU state and height, return the number of bits
+ * to shift right/left in going from virtual to PTE index
+ * and vice versa, the number of useful bits.
+ */
+static void _mmu_decode_va_parameters(CPUState *cs, int height,
+                                      int *shift, int *width)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+    int _shift = 0;
+    int _width = 0;
+
+    switch (height) {
+    case 5:
+        _shift = 48;
+        _width = 9;
+        break;
+    case 4:
+        _shift = 39;
+        _width = 9;
+        break;
+    case 3:
+        _shift = 30;
+        _width = 9;
+        break;
+    case 2:
+        /* 64 bit page tables shift from 30->21 bits here */
+        if (env->cr[4] & CR4_PAE_MASK) {
+            _shift = 21;
+            _width = 9;
+        } else {
+            /* 32 bit page tables shift from 32->22 bits */
+            _shift = 22;
+            _width = 10;
+        }
+        break;
+    case 1:
+        _shift = 12;
+        if (env->cr[4] & CR4_PAE_MASK) {
+            _width = 9;
+        } else {
+            _width = 10;
+        }
+
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    if (shift) {
+        *shift = _shift;
+    }
+
+    if (width) {
+        *width = _width;
+    }
+}
+
 /**
  * mmu_virtual_to_pte_index - Given a virtual address and height in the
  *       page table radix tree, return the index that should be used
@@ -181,47 +240,13 @@ target_ulong mmu_pte_leaf_page_size(CPUState *cs, int height)
 
 int mmu_virtual_to_pte_index(CPUState *cs, target_ulong vaddr, int height)
 {
-    X86CPU *cpu = X86_CPU(cs);
-    CPUX86State *env = &cpu->env;
     int shift = 0;
+    int width = 0;
     int mask = 0;
 
-    switch (height) {
-    case 5:
-        shift = 48;
-        mask = 0x1ff;
-        break;
-    case 4:
-        shift = 39;
-        mask = 0x1ff;
-        break;
-    case 3:
-        shift = 30;
-        mask = 0x1ff;
-        break;
-    case 2:
-        /* 64 bit page tables shift from 30->21 bits here */
-        if (env->cr[4] & CR4_PAE_MASK) {
-            shift = 21;
-            mask = 0x1ff;
-        } else {
-            /* 32 bit page tables shift from 32->22 bits */
-            shift = 22;
-            mask = 0x3ff;
-        }
-        break;
-    case 1:
-        shift = 12;
-        if (env->cr[4] & CR4_PAE_MASK) {
-            mask = 0x1ff;
-        } else {
-            mask = 0x3ff;
-        }
+    _mmu_decode_va_parameters(cs, height, &shift, &width);
 
-        break;
-    default:
-        g_assert_not_reached();
-    }
+    mask = (1 << width) - 1;
 
     return (vaddr >> shift) & mask;
 }
@@ -271,35 +296,8 @@ get_pte(CPUState *cs, hwaddr node, int i, int height,
     }
 
     if (vaddr_pte) {
-        /* XXX: Maybe consolidate with virtual_to_pte_index */
         int shift = 0;
-
-        switch (height) {
-        case 5:
-            shift = 48;
-            break;
-        case 4:
-            shift = 39;
-            break;
-        case 3:
-            shift = 30;
-            break;
-        case 2:
-            /* 64 bit page tables shift from 30->21 bits here */
-            if (env->cr[4] & CR4_PAE_MASK) {
-                shift = 21;
-            } else {
-                /* 32 bit page tables shift from 32->22 bits */
-                shift = 22;
-            }
-            break;
-        case 1:
-            shift = 12;
-            break;
-        default:
-            g_assert_not_reached();
-        }
-
+        _mmu_decode_va_parameters(cs, height, &shift, NULL);
         *vaddr_pte = vaddr_parent | ((i & 0x1ffULL) << shift);
     }
 
@@ -540,18 +538,16 @@ static int add_memory_mapping_to_list(CPUState *cs, void *data, PTE_t *pte,
     struct memory_mapping_data *mm_data = (struct memory_mapping_data *) data;
 
     hwaddr start_paddr = 0;
-    size_t pg_size;
+    size_t pg_size = mmu_pte_leaf_page_size(cs, height);
     switch (height) {
     case 1:
         start_paddr = pte->pte64_t & ~0xfff;
         if (env->cr[4] & CR4_PAE_MASK) {
             start_paddr &= ~(0x1ULL << 63);
         }
-        pg_size = 1 << 12;
         break;
     case 2:
         if (env->cr[4] & CR4_PAE_MASK) {
-            pg_size = 1 << 21;
             start_paddr = (pte->pte64_t & ~0x1fffff) & ~(0x1ULL << 63);
         } else {
             assert(!!(env->cr[4] & CR4_PSE_MASK));
@@ -562,11 +558,11 @@ static int add_memory_mapping_to_list(CPUState *cs, void *data, PTE_t *pte,
              */
             hwaddr high_paddr = ((hwaddr)(pte->pte64_t & 0x1fe000) << 19);
             start_paddr = (pte->pte64_t & ~0x3fffff) | high_paddr;
-            pg_size = 1 << 22;
         }
         break;
     case 3:
-        pg_size = 1 << 30;
+        /* Select bits 30--51 */
+        start_paddr = (pte->pte64_t & 0xfffffc0000000);
         break;
     default:
         g_assert_not_reached();
