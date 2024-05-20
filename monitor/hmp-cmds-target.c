@@ -121,6 +121,7 @@ void hmp_info_registers(Monitor *mon, const QDict *qdict)
     }
 }
 
+
 static void memory_dump(Monitor *mon, int count, int format, int wsize,
                         hwaddr addr, int is_physical)
 {

@@ -2203,6 +2203,8 @@ void x86_mon_info_pg_print_header(struct mem_print_state *state);
 bool x86_mon_flush_print_pg_state(CPUState *cs, struct mem_print_state *state);
 void x86_mon_print_pte(CPUState *cs, GString *out_buf, hwaddr addr,
                        hwaddr child, uint64_t prot, int mmu_idx);
+bool x86_mon_print_mem(CPUState *cs, struct mem_print_state *state);
+
 void x86_cpu_dump_state(CPUState *cs, FILE *f, int flags);
 
 int x86_cpu_gdb_read_register(CPUState *cpu, GByteArray *buf, int reg);
