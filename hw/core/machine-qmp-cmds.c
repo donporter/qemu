@@ -380,7 +380,6 @@ GuidInfo *qmp_query_vm_generation_id(Error **errp)
 }
 
 /* Assume only called on present entries */
-static
 int compressing_iterator(CPUState *cs, void *data, DecodedPTE *pte,
                          int height, int offset,
                          const PageTableLayout *layout)

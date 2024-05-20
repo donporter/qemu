@@ -2160,6 +2160,9 @@ bool x86_mon_init_page_table_iterator(CPUState *cpu, GString *buf,
                                       struct mem_print_state *state);
 void x86_mon_info_pg_print_header(struct mem_print_state *state);
 bool x86_mon_flush_print_pg_state(CPUState *cs, struct mem_print_state *state);
+void x86_mon_print_pte(GString *out_buf, CPUArchState *env, hwaddr addr,
+                       hwaddr child, int prot);
+bool x86_mon_print_mem(CPUState *cs, struct mem_print_state *state);
 
 void x86_cpu_dump_state(CPUState *cs, FILE *f, int flags);
 

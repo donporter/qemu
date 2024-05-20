@@ -685,7 +685,7 @@ typedef struct DecodedPTE {
     int prot; /* Always populated, arch-specific, decoded flags */
     bool present;
     bool leaf; /* Only valid if present */
-    hwaddr child; /* Only valid if present and !leaf */
+    hwaddr child; /* Only valid if present */
     uint64_t leaf_page_size; /* Only valid if present and leaf */
     vaddr bits_translated; /** The virtual address bits translated in walking
                             * the page table to node[i].
