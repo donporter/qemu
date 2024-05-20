@@ -141,8 +141,12 @@ target_ulong mmu_pte_leaf_page_size(CPUState *cs, int height)
     switch (height) {
 #ifdef TARGET_X86_64
     case 5:
+        assert(pae_enabled);
+        assert(env->cr[4] & CR4_LA57_MASK);
+        assert(env->hflags & HF_LMA_MASK);
         return 1ULL << 48;
     case 4:
+        assert(pae_enabled);
         assert(env->hflags & HF_LMA_MASK);
         return 1ULL << 39;
 #endif
@@ -175,6 +179,7 @@ static void _mmu_decode_va_parameters(CPUState *cs, int height,
     CPUX86State *env = &cpu->env;
     int _shift = 0;
     int _width = 0;
+    bool pae_enabled = env->cr[4] & CR4_PAE_MASK;
 
     switch (height) {
     case 5:
@@ -191,7 +196,7 @@ static void _mmu_decode_va_parameters(CPUState *cs, int height,
         break;
     case 2:
         /* 64 bit page tables shift from 30->21 bits here */
-        if (env->cr[4] & CR4_PAE_MASK) {
+        if (pae_enabled) {
             _shift = 21;
             _width = 9;
         } else {
@@ -202,7 +207,7 @@ static void _mmu_decode_va_parameters(CPUState *cs, int height,
         break;
     case 1:
         _shift = 12;
-        if (env->cr[4] & CR4_PAE_MASK) {
+        if (pae_enabled) {
             _width = 9;
         } else {
             _width = 10;

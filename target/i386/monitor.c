@@ -46,6 +46,12 @@ struct mem_print_state {
     bool flush_interior; /* If false, only call flusher() on leaves */
     bool require_physical_contiguity;
     /*
+     * The height at which we started accumulating ranges, i.e., the
+     * next height we need to print once we hit the end of a
+     * contiguous range.
+     */
+    int start_height;
+    /*
      * For compressing contiguous ranges, track the
      * start and end of the range
      */
@@ -56,12 +62,6 @@ struct mem_print_state {
     int64_t ent[MAX_HEIGHT + 1]; /* PTE contents on current root->leaf path */
     int offset[MAX_HEIGHT + 1]; /* PTE range starting offsets */
     int last_offset[MAX_HEIGHT + 1]; /* PTE range ending offsets */
-    int start_height; /*
-                       * The height at which we started accumulating ranges,
-                       * i.e., the next height we need to print once we hit
-                       * the end of a contiguous range.
-                       */
-    int prot[MAX_HEIGHT + 1];
 };
 
 /********************* x86 specific hooks for printing page table stuff ****/
@@ -112,7 +112,6 @@ static bool init_iterator(Monitor *mon, struct mem_print_state *state)
 
     for (int i = 0; i < MAX_HEIGHT; i++) {
         state->vstart[i] = -1;
-        state->prot[i] = 0;
         state->last_offset[i] = 0;
     }
     state->start_height = 0;
