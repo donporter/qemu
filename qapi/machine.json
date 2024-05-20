@@ -1763,6 +1763,23 @@
   'features': [ 'unstable' ] }
 
 ##
+# @x-query-pg:
+#
+# Query current page tables
+#
+# Features:
+#
+# @unstable: This command is meant for debugging.
+#
+# Returns: Compressed summary of page tables.
+#
+# Since: 9.0
+##
+{ 'command': 'x-query-pg',
+  'returns': 'HumanReadableText',
+  'features': [ 'unstable' ] }
+
+##
 # @x-query-ramblock:
 #
 # Query system ramblock information

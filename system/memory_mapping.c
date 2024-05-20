@@ -296,7 +296,7 @@ static CPUState *find_paging_enabled_cpu(void)
     CPUState *cpu;
 
     CPU_FOREACH(cpu) {
-        if (cpu_paging_enabled(cpu)) {
+        if (cpu_paging_enabled(cpu, 0)) {
             return cpu;
         }
     }

@@ -21,6 +21,7 @@
 #define I386_CPU_H
 
 #include "sysemu/tcg.h"
+#include "hw/core/sysemu-cpu-ops.h"
 #include "cpu-qom.h"
 #include "kvm/hyperv-proto.h"
 #include "exec/cpu-defs.h"
@@ -290,6 +291,7 @@ typedef enum X86Seg {
 
 #define DR_RESERVED_MASK 0xffffffff00000000ULL
 
+/* Regular x86 Page Bits */
 #define PG_PRESENT_BIT  0
 #define PG_RW_BIT       1
 #define PG_USER_BIT     2
@@ -326,6 +328,28 @@ typedef enum X86Seg {
 #define PG_ERROR_RSVD_MASK 0x08
 #define PG_ERROR_I_D_MASK  0x10
 #define PG_ERROR_PK_MASK   0x20
+
+/* EPT Bits */
+#define PG_EPT_R_BIT        0
+#define PG_EPT_W_BIT        1
+#define PG_EPT_X_SUPER_BIT  2
+#define PG_EPT_PSE_BIT      7
+#define PG_EPT_ACCESSED_BIT 8
+#define PG_EPT_DIRTY_BIT    9 /* Only set on leaves */
+#define PG_EPT_X_USER_BIT  10
+
+#define PG_EPT_R_MASK        (1 << PG_EPT_R_BIT)
+#define PG_EPT_W_MASK        (1 << PG_EPT_W_BIT)
+#define PG_EPT_X_SUPER_MASK  (1 << PG_EPT_X_SUPER_BIT)
+#define PG_EPT_PSE_MASK      (1 << PG_EPT_PSE_BIT)
+#define PG_EPT_ACCESSED_MASK (1 << PG_EPT_ACCESSED_BIT)
+#define PG_EPT_DIRTY_MASK    (1 << PG_EPT_DIRTY_BIT)
+#define PG_EPT_X_USER_MASK   (1 << PG_EPT_X_USER_BIT)
+
+/* EPT_X_USER_BIT only checked if vm mode based controls enabled */
+#define PG_EPT_PRESENT_MASK (PG_EPT_R_MASK | PG_EPT_W_MASK \
+                             | PG_EPT_X_SUPER_MASK)
+
 
 #define PG_MODE_PAE      (1 << 0)
 #define PG_MODE_LMA      (1 << 1)
@@ -1126,6 +1150,7 @@ uint64_t x86_cpu_get_supported_feature_word(FeatureWord w,
 #define VMX_SECONDARY_EXEC_RDSEED_EXITING           0x00010000
 #define VMX_SECONDARY_EXEC_ENABLE_PML               0x00020000
 #define VMX_SECONDARY_EXEC_XSAVES                   0x00100000
+#define VMX_SECONDARY_EXEC_ENABLE_MODE_BASED_EXC    0x00400000
 #define VMX_SECONDARY_EXEC_TSC_SCALING              0x02000000
 #define VMX_SECONDARY_EXEC_ENABLE_USER_WAIT_PAUSE   0x04000000
 
@@ -1800,6 +1825,19 @@ typedef struct CPUArchState {
     }; /* break/watchpoints for dr[0..3] */
     int old_exception;  /* exception in flight */
 
+    /* Genericized architectural state for virtualization.  Work in progress */
+    bool nested_paging; /* Nested or extended hardware paging enabled */
+    bool vm_state_valid; /* Not all accelerators sync nested_cr3 */
+    bool enable_ept_accessed_dirty;
+    bool enable_mode_based_access_control;
+    uint8_t nested_pg_height;
+    uint8_t nested_pg_format; // 0 == Intel EPT, 1 == AMD NPT
+    uint64_t nested_pg_root;
+    /* End generic architctural state for virtualization */
+
+    /**** accelerator specific virtualization state *****/
+
+    /* TCG */
     uint64_t vm_vmcb;
     uint64_t tsc_offset;
     uint64_t intercept;
@@ -2150,8 +2188,19 @@ int x86_cpu_write_elf64_qemunote(WriteCoreDumpFunction f, CPUState *cpu,
 int x86_cpu_write_elf32_qemunote(WriteCoreDumpFunction f, CPUState *cpu,
                                  DumpState *s);
 
+int get_pg_mode(CPUX86State *env);
+hwaddr x86_page_table_root(CPUState *cs, const PageTableLayout **layout,
+                           int mmu_idx);
+bool x86_get_pte(CPUState *cs, hwaddr node, int i, int height,
+                 DecodedPTE *pt_entry, vaddr vaddr_parent, bool read_only,
+                 int mmu_idx);
+int x86_virtual_to_pte_index(CPUState *cs, vaddr vaddr_in, int height);
 bool x86_cpu_get_memory_mapping(CPUState *cpu, MemoryMappingList *list,
                                 Error **errp);
+bool x86_mon_init_page_table_iterator(CPUState *cpu, GString *buf, int mmu_idx,
+                                      struct mem_print_state *state);
+void x86_mon_info_pg_print_header(struct mem_print_state *state);
+bool x86_mon_flush_print_pg_state(CPUState *cs, struct mem_print_state *state);
 
 void x86_cpu_dump_state(CPUState *cs, FILE *f, int flags);
 
@@ -2485,9 +2534,6 @@ static inline bool cpu_vmx_maybe_enabled(CPUX86State *env)
     return cpu_has_vmx(env) &&
            ((env->cr[4] & CR4_VMXE_MASK) || (env->hflags & HF_SMM_MASK));
 }
-
-/* excp_helper.c */
-int get_pg_mode(CPUX86State *env);
 
 /* fpu_helper.c */
 void update_fp_status(CPUX86State *env);

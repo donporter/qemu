@@ -93,6 +93,44 @@ extern const uint8_t parity_table[256];
 void cpu_load_eflags(CPUX86State *env, int eflags, int update_mask);
 G_NORETURN void do_pause(CPUX86State *env);
 
+/* sysemu/excp_helper.c */
+typedef enum TranslateFaultStage2 {
+    S2_NONE,
+    S2_GPA,
+    S2_GPT,
+} TranslateFaultStage2;
+
+typedef struct TranslateFault {
+    int exception_index;
+    int error_code;
+    target_ulong cr2;
+    TranslateFaultStage2 stage2;
+} TranslateFault;
+
+typedef struct PTETranslate {
+    CPUX86State *env;
+    TranslateFault *err;
+    int ptw_idx;
+    void *haddr;
+    hwaddr gaddr;
+} PTETranslate;
+
+bool ptw_setl_slow(const PTETranslate *in, uint32_t old, uint32_t new);
+static inline bool ptw_setl(const PTETranslate *in, uint32_t old, uint32_t set)
+{
+    if (set & ~old) {
+        uint32_t new = old | set;
+        if (likely(in->haddr)) {
+            old = cpu_to_le32(old);
+            new = cpu_to_le32(new);
+            return qatomic_cmpxchg((uint32_t *)in->haddr, old, new) == old;
+        }
+        return ptw_setl_slow(in, old, new);
+    }
+    return true;
+}
+
+
 /* sysemu/svm_helper.c */
 #ifndef CONFIG_USER_ONLY
 G_NORETURN void cpu_vmexit(CPUX86State *nenv, uint32_t exit_code,
