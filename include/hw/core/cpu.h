@@ -671,8 +671,57 @@ int cpu_write_elf32_qemunote(WriteCoreDumpFunction f, CPUState *cpu,
  * Caller is responsible for freeing the data.
  */
 GuestPanicInformation *cpu_get_crash_info(CPUState *cpu);
-
 #endif /* !CONFIG_USER_ONLY */
+
+/* Maximum supported page table height - currently x86 at 5 */
+#define MAX_HEIGHT 5
+
+typedef struct PageTableLayout {
+    int height; /* Height of the page table */
+    int entries_per_node[MAX_HEIGHT+1];
+} PageTableLayout;
+
+typedef struct DecodedPTE {
+    int prot; /* Always populated, arch-specific, decoded flags */
+    bool present;
+    bool leaf; /* Only valid if present */
+    hwaddr child; /* Only valid if present and !leaf */
+    uint64_t leaf_page_size; /* Only valid if present and leaf */
+    vaddr bits_translated; /** The virtual address bits translated in walking
+                            * the page table to node[i].
+                            */
+    hwaddr pte_addr; /* Pointer to physical address of the PTE within node */
+} DecodedPTE;
+
+typedef int (*qemu_page_walker_for_each)(CPUState *cs, void *data,
+                                         DecodedPTE *pte,
+                                         int height, int offset,
+                                         const PageTableLayout *layout);
+
+/**
+ * for_each_pte - iterate over a page table, and
+ *                call fn on each entry
+ *
+ * @cs - CPU state
+ * @fn(cs, data, pte, height, offset, layout) - User-provided function to call
+ *                                              on each pte.
+ *   * @cs - pass through cs
+ *   * @data - user-provided, opaque pointer
+ *   * @pte - current pte, decoded
+ *   * @height - height in the tree of pte
+ *   * @offset - offset within the page tabe node
+ *   * @layout - pointer to a PageTableLayout for this tree
+ * @data - opaque pointer; passed through to fn
+ * @visit_interior_nodes - if true, call fn() on interior entries in
+ *                         page table; if false, visit only leaf entries.
+ * @visit_not_present - if true, call fn() on entries that are not present.
+ *                         if false, visit only present entries.
+ *
+ * Returns true on success, false on error.
+ *
+ */
+bool for_each_pte(CPUState *cs, qemu_page_walker_for_each fn, void *data,
+                  bool visit_interior_nodes, bool visit_not_present);
 
 /**
  * CPUDumpFlags:

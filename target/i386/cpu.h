@@ -21,6 +21,7 @@
 #define I386_CPU_H
 
 #include "sysemu/tcg.h"
+#include "hw/core/sysemu-cpu-ops.h"
 #include "cpu-qom.h"
 #include "kvm/hyperv-proto.h"
 #include "exec/cpu-defs.h"
@@ -2150,8 +2151,15 @@ int x86_cpu_write_elf64_qemunote(WriteCoreDumpFunction f, CPUState *cpu,
 int x86_cpu_write_elf32_qemunote(WriteCoreDumpFunction f, CPUState *cpu,
                                  DumpState *s);
 
+hwaddr x86_page_table_root(CPUState *cs, const PageTableLayout **layout);
+void x86_get_pte(CPUState *cs, hwaddr node, int i, int height,
+                 DecodedPTE *pt_entry, vaddr vaddr_parent);
 bool x86_cpu_get_memory_mapping(CPUState *cpu, MemoryMappingList *list,
                                 Error **errp);
+bool x86_mon_init_page_table_iterator(CPUState *cpu, GString *buf,
+                                      struct mem_print_state *state);
+void x86_mon_info_pg_print_header(struct mem_print_state *state);
+bool x86_mon_flush_print_pg_state(CPUState *cs, struct mem_print_state *state);
 
 void x86_cpu_dump_state(CPUState *cs, FILE *f, int flags);
 

@@ -13,6 +13,41 @@
 #include "hw/core/cpu.h"
 
 /*
+ * struct mem_print_state: Used by qmp in walking page tables.
+ */
+struct mem_print_state {
+    GString *buf;
+    CPUArchState *env;
+    int vaw, paw; /* VA and PA width in characters */
+    int max_height;
+    bool (*flusher)(CPUState *cs, struct mem_print_state *state);
+    bool flush_interior; /* If false, only call flusher() on leaves */
+    bool require_physical_contiguity;
+    /*
+     * The height at which we started accumulating ranges, i.e., the
+     * next height we need to print once we hit the end of a
+     * contiguous range.
+     */
+    int start_height;
+    int leaf_height; /* The height at which we found a leaf, or -1 */
+    /*
+     * For compressing contiguous ranges, track the
+     * start and end of the range
+     */
+    hwaddr vstart[MAX_HEIGHT + 1]; /* Starting virt. addr. of open pte range */
+    hwaddr vend[MAX_HEIGHT + 1]; /* Ending virtual address of open pte range */
+    hwaddr pstart; /* Starting physical address of open pte range */
+    hwaddr pend; /* Ending physical address of open pte range */
+    uint64_t prot[MAX_HEIGHT + 1]; /** PTE protection flags current root->leaf
+                                      path */
+    uint64_t pg_size[MAX_HEIGHT + 1]; /** Page size,
+                                       *  or address range covered. */
+    int offset[MAX_HEIGHT + 1]; /* PTE range starting offsets */
+    int last_offset[MAX_HEIGHT + 1]; /* PTE range ending offsets */
+};
+
+
+/*
  * struct SysemuCPUOps: System operations specific to a CPU class
  */
 typedef struct SysemuCPUOps {
@@ -86,6 +121,63 @@ typedef struct SysemuCPUOps {
      *               Do not use in new targets, use #DeviceClass::vmsd instead.
      */
     const VMStateDescription *legacy_vmsd;
+
+    /**
+     * page_table_root - Given a CPUState, return the physical address
+     *                    of the current page table root, as well as
+     *                    setting a pointer to a PageTableLayout.
+     *
+     * @cs - CPU state
+     * @layout - a pointer to a PageTableLayout structure, which stores
+     *           the page table tree geometry.
+     *
+     * Returns a hardware address on success.  Should not fail (i.e.,
+     * caller is responsible to ensure that a page table is actually
+     * present).
+     *
+     * Do not free layout.
+     */
+    hwaddr (*page_table_root)(CPUState *cs, const PageTableLayout **layout);
+
+    /**
+     * get_pte - Copy and decode the contents of the page table entry at
+     *           node[i] into pt_entry.
+     *
+     * @cs - CPU state
+     * @node - physical address of the current page table node
+     * @i - index (in page table entries, not bytes) of the page table
+     *      entry, within node
+     * @height - height of node within the tree (leaves are 1, not 0)
+     * @pt_entry - Pointer to a DecodedPTE, stores the contents of the page
+     *             table entry
+     * @vaddr_parent - The virtual address bits already translated in
+     *                 walking the page table to node.  Optional: only
+     *                 used if vaddr_pte is set.
+     */
+
+    void (*get_pte)(CPUState *cs, hwaddr node, int i, int height,
+                    DecodedPTE *pt_entry, vaddr vaddr_parent);
+
+    /**
+     * @mon_init_page_table_iterator: Callback to configure a page table
+     * iterator for use by a monitor function.
+     * Returns true on success, false if not supported (e.g., no paging disabled
+     * or not implemented on this CPU).
+     */
+    bool (*mon_init_page_table_iterator)(CPUState *cpu, GString *buf,
+                                         struct mem_print_state *state);
+
+    /**
+     * @mon_info_pg_print_header: Prints the header line for 'info pg'.
+     */
+    void (*mon_info_pg_print_header)(struct mem_print_state *state);
+
+    /**
+     * @flush_page_table_iterator_state: For 'info pg', it prints the last
+     * entry that was visited by the compressing_iterator, if one is present.
+     */
+    bool (*mon_flush_page_print_state)(CPUState *cs,
+                                       struct mem_print_state *state);
 
 } SysemuCPUOps;
 

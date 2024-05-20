@@ -32,6 +32,155 @@
 #include "qapi/qapi-commands-misc-target.h"
 #include "qapi/qapi-commands-misc.h"
 
+
+/********************* x86 specific hooks for printing page table stuff ****/
+
+const char *names[7] = {(char *)NULL, "PTE", "PDE", "PDP", "PML4", "Pml5",
+                        (char *)NULL};
+static char *pg_bits(hwaddr ent)
+{
+    static char buf[32];
+    snprintf(buf, 32, "%c%c%c%c%c%c%c%c%c%c",
+            ent & PG_NX_MASK ? 'X' : '-',
+            ent & PG_GLOBAL_MASK ? 'G' : '-',
+            ent & PG_PSE_MASK ? 'S' : '-',
+            ent & PG_DIRTY_MASK ? 'D' : '-',
+            ent & PG_ACCESSED_MASK ? 'A' : '-',
+            ent & PG_PCD_MASK ? 'C' : '-',
+            ent & PG_PWT_MASK ? 'T' : '-',
+            ent & PG_USER_MASK ? 'U' : '-',
+            ent & PG_RW_MASK ? 'W' : '-',
+            ent & PG_PRESENT_MASK ? 'P' : '-');
+    return buf;
+}
+
+bool x86_mon_init_page_table_iterator(CPUState *cs, GString *buf,
+                                      struct mem_print_state *state)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+
+    state->env = env;
+    state->buf = buf;
+    state->flush_interior = false;
+    state->require_physical_contiguity = false;
+
+    for (int i = 0; i < MAX_HEIGHT; i++) {
+        state->vstart[i] = -1;
+        state->last_offset[i] = 0;
+    }
+    state->start_height = 0;
+
+    if (!(env->cr[0] & CR0_PG_MASK)) {
+        g_string_append_printf(buf, "PG disabled\n");
+        return false;
+    }
+
+    /* set va and pa width */
+    if (env->cr[4] & CR4_PAE_MASK) {
+        state->paw = 13;
+#ifdef TARGET_X86_64
+        if (env->hflags & HF_LMA_MASK) {
+            if (env->cr[4] & CR4_LA57_MASK) {
+                state->vaw = 15;
+                state->max_height = 5;
+            } else {
+                state->vaw = 12;
+                state->max_height = 4;
+            }
+        } else
+#endif
+        {
+            state->vaw = 8;
+            state->max_height = 3;
+        }
+    } else {
+        state->max_height = 2;
+        state->vaw = 8;
+        state->paw = 8;
+    }
+
+    return true;
+}
+
+void x86_mon_info_pg_print_header(struct mem_print_state *state)
+{
+    /* Header line */
+    g_string_append_printf(state->buf, "%-*s %-13s %-10s %*s%s\n",
+                           3 + 2 * (state->vaw - 3), "VPN range",
+                           "Entry", "Flags",
+                           2 * (state->max_height - 1), "",
+                           "Physical page(s)");
+}
+
+
+static void pg_print(CPUState *cs, GString *out_buf, uint64_t pt_ent,
+                     vaddr vaddr_s, vaddr vaddr_l,
+                     hwaddr paddr_s, hwaddr paddr_l,
+                     int offset_s, int offset_l,
+                     int height, int max_height, int vaw, int paw,
+                     uint64_t page_size, bool is_leaf)
+
+{
+    g_autoptr(GString) buf = g_string_new("");
+
+    /* VFN range */
+    g_string_append_printf(buf, "%*s[%0*"PRIx64"-%0*"PRIx64"] ",
+                           (max_height - height) * 2, "",
+                           vaw - 3, vaddr_s >> 12,
+                           vaw - 3, (vaddr_l + page_size - 1) >> 12);
+
+    /* Slot */
+    if (vaddr_s == vaddr_l) {
+        g_string_append_printf(buf, "%4s[%03x]    ",
+                               names[height], offset_s);
+    } else {
+        g_string_append_printf(buf, "%4s[%03x-%03x]",
+                               names[height], offset_s, offset_l);
+    }
+
+    /* Flags */
+    g_string_append_printf(buf, " %s", pg_bits(pt_ent));
+
+
+    /* Range-compressed PFN's */
+    if (is_leaf) {
+        if (vaddr_s == vaddr_l) {
+            g_string_append_printf(buf, " %0*"PRIx64,
+                                   paw - 3, (uint64_t)paddr_s >> 12);
+        } else {
+            g_string_append_printf(buf, " %0*"PRIx64"-%0*"PRIx64,
+                            paw - 3, (uint64_t)paddr_s >> 12,
+                            paw - 3, (uint64_t)paddr_l >> 12);
+        }
+    }
+
+    /* Trim line to fit screen */
+    g_string_truncate(buf, 79);
+
+    g_string_append_printf(out_buf, "%s\n", buf->str);
+}
+
+/* Returns true if it emitted anything */
+bool x86_mon_flush_print_pg_state(CPUState *cs, struct mem_print_state *state)
+{
+    bool ret = false;
+    for (int i = state->start_height; i > 0; i--) {
+        if (state->vstart[i] == -1) {
+            break;
+        }
+        ret = true;
+        pg_print(cs, state->buf, state->prot[i],
+                 state->vstart[i], state->vend[i],
+                 state->pstart, state->pend,
+                 state->offset[i], state->last_offset[i],
+                 i, state->max_height, state->vaw, state->paw,
+                 state->pg_size[i], i == state->leaf_height);
+    }
+
+    return ret;
+}
+
 /* Perform linear address sign extension */
 static hwaddr addr_canonical(CPUArchState *env, hwaddr addr)
 {
