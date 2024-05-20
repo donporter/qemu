@@ -179,6 +179,11 @@ typedef struct SysemuCPUOps {
      * iterator for use by a monitor function.
      * Returns true on success, false if not supported (e.g., no paging disabled
      * or not implemented on this CPU).
+     *
+     * @mmu_idx - Which level of the mmu we are interested in:
+     *            0 == user mode, 1 == nested page table
+     *            Note that MMU_*_IDX macros are not consistent across
+     *            architectures.
      */
     bool (*mon_init_page_table_iterator)(CPUState *cpu, GString *buf, int mmu_idx,
                                          struct mem_print_state *state);
@@ -194,6 +199,13 @@ typedef struct SysemuCPUOps {
      */
     bool (*mon_flush_page_print_state)(CPUState *cs,
                                        struct mem_print_state *state);
+
+    /**
+     * @mon_print_pte: Hook called by the monitor to print a page
+     * table entry at address addr, with contents pte.
+     */
+    void (*mon_print_pte) (CPUState *cs, GString *buf, hwaddr addr,
+                           hwaddr pte, uint64_t prot, int mmu_idx);
 
 } SysemuCPUOps;
 

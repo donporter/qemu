@@ -382,7 +382,7 @@ GuidInfo *qmp_query_vm_generation_id(Error **errp)
 /* Assume only called on present entries */
 static
 int compressing_iterator(CPUState *cs, void *data, DecodedPTE *pte,
-                         int height, int offset,
+                         int height, int offset, int mmu_idx,
                          const PageTableLayout *layout)
 {
     struct mem_print_state *state = (struct mem_print_state *) data;

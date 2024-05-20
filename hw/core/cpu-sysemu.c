@@ -211,13 +211,13 @@ for_each_pte_recursive(CPUState *cs, qemu_page_walker_for_each fn, void *data,
         if (pt_entry.present || visit_not_present) {
 
             if (!pt_entry.present || pt_entry.leaf) {
-                if (fn(cs, data, &pt_entry, height, i, layout)) {
+                if (fn(cs, data, &pt_entry, height, i, mmu_idx, layout)) {
                     /* Error */
                     return false;
                 }
             } else { /* Non-leaf */
                 if (visit_interior_nodes) {
-                    if (fn(cs, data, &pt_entry, height, i, layout)) {
+                    if (fn(cs, data, &pt_entry, height, i, mmu_idx, layout)) {
                         /* Error */
                         return false;
                     }

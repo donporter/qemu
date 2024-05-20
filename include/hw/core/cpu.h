@@ -699,7 +699,7 @@ typedef struct DecodedPTE {
 
 typedef int (*qemu_page_walker_for_each)(CPUState *cs, void *data,
                                          DecodedPTE *pte,
-                                         int height, int offset,
+                                         int height, int offset, int mmu_idx,
                                          const PageTableLayout *layout);
 
 /**
