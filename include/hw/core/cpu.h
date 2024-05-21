@@ -687,6 +687,7 @@ typedef struct DecodedPTE {
     bool leaf; /* Only valid if present */
     hwaddr child; /* Only valid if present and !leaf */
     uint64_t leaf_page_size; /* Only valid if present and leaf */
+    uint64_t contents; /* Copy of undecoded contents */
     vaddr bits_translated; /** The virtual address bits translated in walking
                             * the page table to node[i].
                             */
