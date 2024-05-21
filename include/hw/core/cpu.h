@@ -687,9 +687,20 @@ typedef struct DecodedPTE {
     bool present;
     bool leaf; /* Only valid if present */
     bool reserved_bits_ok;
+    bool user_read_ok;
+    bool user_write_ok;
+    bool user_exec_ok;
+    bool super_read_ok;
+    bool super_write_ok;
+    bool super_exec_ok;
     hwaddr child; /* Only valid if present and !leaf */
     uint64_t leaf_page_size; /* Only valid if present and leaf */
-    vaddr bits_translated; /** The virtual address bits translated in walking
+    uint64_t nested_page_size; /*
+                                * If nested paging, the page size of the host
+                                * page storing the data, versus the size of the
+                                *  guest page frame in leaf_page_size */
+    vaddr bits_translated; /*
+                            * The virtual address bits translated in walking
                             * the page table to node[i].
                             */
     hwaddr pte_addr; /* (guest) physical address of the PTE */
@@ -720,8 +731,6 @@ typedef int (*qemu_page_walker_for_each)(CPUState *cs, void *data,
  *                         page table; if false, visit only leaf entries.
  * @visit_not_present - if true, call fn() on entries that are not present.
  *                         if false, visit only present entries.
- * @read_only - If true, do not update softmmu state (if applicable) to reflect
- *              the page table walk.
  * @mmu_idx - Which level of the mmu we are interested in:
  *            0 == user mode, 1 == nested page table
  *            Note that MMU_*_IDX macros are not consistent across
@@ -729,10 +738,13 @@ typedef int (*qemu_page_walker_for_each)(CPUState *cs, void *data,
  *
  * Returns true on success, false on error.
  *
+ * We assume all callers of this function are in debug mode, and do not
+ * want to synthesize, say, a user-mode load, on each page in the address
+ * space.
  */
 bool for_each_pte(CPUState *cs, qemu_page_walker_for_each fn, void *data,
                   bool visit_interior_nodes, bool visit_not_present,
-                  bool visit_malformedd, bool read_only, int mmu_idx);
+                  bool visit_malformed, int mmu_idx);
 
 /**
  * CPUDumpFlags:

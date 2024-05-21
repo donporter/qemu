@@ -272,7 +272,7 @@ void helper_hmp_info_tlb(CPUState *cs, Monitor *mon, int mmu_idx)
      * 'info tlb' visits only leaf PTEs marked present.
      * It does not check other protection bits.
      */
-    for_each_pte(cs, &mem_print_tlb, &state, false, false, false, true, mmu_idx);
+    for_each_pte(cs, &mem_print_tlb, &state, false, false, false,  mmu_idx);
 
     monitor_printf(mon, "%s", buf->str);
 }
@@ -377,7 +377,7 @@ void helper_hmp_info_mem(CPUState *cs, Monitor *mon, int mmu_idx)
     /**
      * We must visit interior entries to update prot
      */
-    for_each_pte(cs, &compressing_iterator, &state, true, false, false, true, mmu_idx);
+    for_each_pte(cs, &compressing_iterator, &state, true, false, false, mmu_idx);
 
     /* Flush the last entry, if needed */
     cc->sysemu_ops->mon_print_mem(cs, &state);

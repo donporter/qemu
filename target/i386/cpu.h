@@ -2192,8 +2192,9 @@ int get_pg_mode(CPUX86State *env);
 hwaddr x86_page_table_root(CPUState *cs, const PageTableLayout **layout,
                            int mmu_idx);
 bool x86_get_pte(CPUState *cs, hwaddr node, int i, int height,
-                 DecodedPTE *pt_entry, vaddr vaddr_parent, bool read_only,
-                 int mmu_idx);
+                 DecodedPTE *pt_entry, vaddr vaddr_parent, bool debug,
+                 int mmu_idx, bool user_access, const MMUAccessType access_type,
+                 int *error_code, hwaddr *fault_addr, bool *nested_fault);
 int x86_virtual_to_pte_index(CPUState *cs, vaddr vaddr_in, int height);
 bool x86_cpu_get_memory_mapping(CPUState *cpu, MemoryMappingList *list,
                                 Error **errp);
@@ -2204,6 +2205,11 @@ bool x86_mon_flush_print_pg_state(CPUState *cs, struct mem_print_state *state);
 void x86_mon_print_pte(CPUState *cs, GString *out_buf, hwaddr addr,
                        hwaddr child, uint64_t prot, int mmu_idx);
 bool x86_mon_print_mem(CPUState *cs, struct mem_print_state *state);
+bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
+                       bool debug, int mmu_idx, bool user_access,
+                       const MMUAccessType access_type, uint64_t *page_size,
+                       int *error_code, hwaddr *fault_addr, bool *nested_fault,
+                       int *prot);
 
 void x86_cpu_dump_state(CPUState *cs, FILE *f, int flags);
 

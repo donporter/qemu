@@ -37,10 +37,6 @@ const PageTableLayout x86_pae32_layout = { .height = 3,
 const PageTableLayout x86_ia32_layout = { .height = 2,
     .entries_per_node = {0, 1024, 1024, 0, 0, 0}};
 
-static
-bool x86_ptw_translate(CPUState *cs, hwaddr gpa, hwaddr *hpa, bool read_only,
-                       int mmu_idx);
-
 /**
  * x86_page_table_root - Given a CPUState, return the physical address
  *                       of the current page table root, as well as
@@ -218,7 +214,6 @@ int x86_virtual_to_pte_index(CPUState *cs, vaddr vaddr_in, int height)
     return (vaddr_in >> shift) & mask;
 }
 
-
 /**
  * x86_get_pte - Copy and decode the contents of the page table entry at
  *               node[i] into pt_entry.
@@ -231,29 +226,46 @@ int x86_virtual_to_pte_index(CPUState *cs, vaddr vaddr_in, int height)
  * @pt_entry - Poiter to a DecodedPTE, stores the contents of the page table entry
  * @vaddr_parent - The virtual address bits already translated in walking the
  *                 page table to node.  Optional: only used if vaddr_pte is set.
- * @read_only - If true, do not update softmmu state (if applicable) to reflect
- *              the page table walk.
+ * @debug - If true, do not update softmmu state (if applicable) to reflect
+ *          the page table walk.
  * @mmu_idx - Which level of the mmu we are interested in: 0 == user
  *            mode, 1 == nested page table Note that MMU_*_IDX macros
  *            are not consistent across architectures.
+ * @user_access - For non-debug accesses, is this a user or supervisor-mode
+ *                access.  Used to determine faults.
+ * @access_type - For non-debug accesses, what type of access is driving the
+ *                lookup.  Used to determine faults.
+ * @error_code - Optional integer pointer, to store error reason on failure
+ * @fault_addr - Optional vaddr pointer, to store the faulting address on a
+ *               recursive page walk for the pe.  Otherwise, caller is expected
+ *               to determine if this pte access would fault.
+ * @nested_fault - Optional boolean pointer, to differentiate nested faults.
+ *                 Set to true if there is a fault recurring on a nested page
+ *                 table.
  *
- * Returns true on success, false on failure
+ * Returns true on success, false on failure.  This should only fail if a page table
+ * entry cannot be read because the address of node is not a valid (guest) physical
+ * address.  Otherwise, we capture errors like bad reserved flags in the DecodedPTE
+ * entry and let the caller decide how to handle it.
  */
 bool
 x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
-            vaddr vaddr_parent, bool read_only, int mmu_idx)
+            vaddr vaddr_parent, bool debug, int mmu_idx, bool user_access,
+            const MMUAccessType access_type, int *error_code,
+            vaddr *fault_addr, bool *nested_fault)
 {
     CPUX86State *env = cpu_env(cs);
     int32_t a20_mask = x86_get_a20_mask(env);
-    bool pae_enabled = env->cr[4] & CR4_PAE_MASK;
     hwaddr pte = 0;
     uint64_t pte_contents = 0;
     hwaddr pte_host_addr = 0;
     uint64_t unused = 0; /* We always call probe_access in non-fault mode */
     bool use_stage2 = env->hflags & HF_GUEST_MASK;
     int pte_width = 4;
-    bool long_mode = env->hflags & HF_LMA_MASK;
     uint64_t leaf_mask = 0;
+    int pg_mode = get_pg_mode(env);
+    bool pae_enabled = !!(pg_mode & PG_MODE_PAE);
+    bool long_mode = !!(pg_mode & PG_MODE_LMA);
 
     pt_entry->reserved_bits_ok = false;
 
@@ -264,23 +276,37 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
 
     pte = (node + (i * pte_width)) & a20_mask;
 
-
     /* Recur on nested paging */
     if (mmu_idx == 0 && use_stage2) {
 
-        if (read_only) {
-            bool ok = x86_ptw_translate(cs, pte, &pte_host_addr, read_only, 1);
+        if (debug) {
+            bool ok = x86_ptw_translate(cs, pte, &pte_host_addr, debug, 1,
+                                        user_access, access_type, NULL,
+                                        error_code, fault_addr, NULL, NULL);
             if (!ok) {
+                if (nested_fault) {
+                    *nested_fault = true;
+                }
                 return false;
             }
         } else {
 #ifdef CONFIG_TCG
+            CPUTLBEntryFull *full;
             void *tmp;
-            int flags = probe_access_flags(env, pte, 0, MMU_DATA_STORE,
-                                           MMU_NESTED_IDX, true,
-                                           &tmp, unused);
+            int flags = probe_access_full(env, pte, 0, MMU_DATA_STORE,
+                                          MMU_NESTED_IDX, true,
+                                          &tmp, &full, unused);
 
             if (unlikely(flags & TLB_INVALID_MASK)) {
+                if (nested_fault) {
+                    *nested_fault = true;
+                }
+                if (error_code) {
+                    *error_code = env->error_code;
+                }
+                if (fault_addr) {
+                    *fault_addr = pte;
+                }
                 return false;
             }
 
@@ -314,46 +340,36 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
             cpu_ldl_mmuidx_ra(env, pte, MMU_PHYS_IDX, unused);
     }
 
-#ifdef CONFIG_TCG
-    /* In non-read-only case, set accessed bits */
-    if (!read_only) {
-        TranslateFault err;
-        PTETranslate pte_trans = {
-            .gaddr = pte,
-            .haddr = (void *)pte_host_addr,
-            .env = env,
-            .err = &err,
-        };
-
-        switch(mmu_idx) {
-        case 0:
-            pte_trans.ptw_idx = use_stage2 ? MMU_NESTED_IDX : MMU_PHYS_IDX;
-            if(!ptw_setl(&pte_trans, pte, PG_ACCESSED_MASK)) {
-                goto reread_pte;
-            }
-            break;
-        case 1:
-            if (env->enable_ept_accessed_dirty) {
-                pte_trans.ptw_idx = MMU_PHYS_IDX;
-                if(!ptw_setl(&pte_trans, pte, PG_EPT_ACCESSED_MASK)) {
-                    goto reread_pte;
-                }
-            }
-            break;
-        default:
-            g_assert_not_reached();
-        }
-    }
-#else
-    assert(read_only);
-#endif
-
-
     /* Deserialize flag bits, different by mmu index */
     if (mmu_idx == 0 ||
         (mmu_idx == 1 && env->vm_state_valid && env->nested_pg_format == 1))
     {
         pt_entry->present = pte_contents & PG_PRESENT_MASK;
+
+        if (pt_entry->present) {
+            bool nx_enabled = !!(pg_mode & PG_MODE_NXE);
+            bool smep_enabled = !!(pg_mode & PG_MODE_SMEP);
+
+            pt_entry->super_read_ok = true;
+            pt_entry->super_write_ok = !!(pte_contents & PG_RW_MASK);
+            if (nx_enabled) {
+                if (smep_enabled) {
+                    pt_entry->super_exec_ok = !(pte_contents & PG_USER_MASK);
+                } else {
+                    pt_entry->super_exec_ok = !(pte_contents & PG_NX_MASK);
+                }
+                pt_entry->user_exec_ok = !(pte_contents & PG_NX_MASK);
+            } else {
+                pt_entry->super_exec_ok = true;
+                pt_entry->user_exec_ok = !(pte_contents & PG_USER_MASK);
+            }
+
+            if ((pte_contents & PG_USER_MASK)) {
+                pt_entry->user_read_ok = true;
+                pt_entry->user_write_ok = pt_entry->super_write_ok;
+            }
+        }
+
         pt_entry->prot = pte_contents & (PG_USER_MASK | PG_RW_MASK |
                                          PG_PRESENT_MASK);
         leaf_mask = PG_PSE_MASK;
@@ -369,6 +385,17 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
             mask |= PG_EPT_X_USER_MASK;
         }
         pt_entry->present = !!(pte_contents & mask);
+        if (pt_entry->present) {
+            pt_entry->super_read_ok = pt_entry->user_read_ok
+                = !!(pte_contents & PG_EPT_R_MASK);
+
+            pt_entry->super_exec_ok = !!(pte_contents & PG_EPT_X_SUPER_MASK);
+            if ( env->enable_mode_based_access_control ) {
+                pt_entry->user_exec_ok = !!(pte_contents & PG_EPT_X_USER_MASK);
+            } else {
+                pt_entry->user_exec_ok = pt_entry->super_exec_ok;
+            }
+        }
         pt_entry->prot = pte_contents & (PG_EPT_PRESENT_MASK | PG_EPT_X_USER_MASK);
         leaf_mask = PG_EPT_PSE_MASK;
     } else {
@@ -457,7 +484,6 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
             g_assert_not_reached();
         }
 
-
         /* Check reserved bits */
         uint64_t rsvd_mask = ~MAKE_64BIT_MASK(0, env_archcpu(env)->phys_bits);
 
@@ -510,6 +536,47 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
         } else {
             pt_entry->reserved_bits_ok = true;
         }
+
+        /* In non-read-only case, set accessed bits */
+        if (!debug) {
+#ifdef CONFIG_TCG
+            TranslateFault err;
+            PTETranslate pte_trans = {
+                .gaddr = pte,
+                .haddr = (void *)pte_host_addr,
+                .env = env,
+                .err = &err,
+            };
+
+            /* If this is a leaf and a store, set the dirty bit too */
+            if (mmu_idx == 0 || (mmu_idx == 1 && env->nested_pg_format == 1)) {
+                uint32_t set = PG_ACCESSED_MASK;
+                if (pt_entry->leaf && access_type == MMU_DATA_STORE) {
+                    set |= PG_DIRTY_MASK;
+                }
+                pte_trans.ptw_idx = use_stage2 ? MMU_NESTED_IDX : MMU_PHYS_IDX;
+                if(!ptw_setl(&pte_trans, pte, set)) {
+                    goto reread_pte;
+                }
+            } else if (mmu_idx == 1) {
+                assert(env->nested_pg_format == 0);
+                if (env->enable_ept_accessed_dirty) {
+                    uint32_t set = PG_EPT_ACCESSED_MASK;
+                    if (pt_entry->leaf && access_type == MMU_DATA_STORE) {
+                        set |= PG_EPT_DIRTY_MASK;
+                    }
+                    pte_trans.ptw_idx = MMU_PHYS_IDX;
+                    if(!ptw_setl(&pte_trans, pte, PG_EPT_ACCESSED_MASK)) {
+                        goto reread_pte;
+                    }
+                }
+            } else {
+                g_assert_not_reached();
+            }
+#else
+            g_assert_not_reached();
+#endif
+        }
     }
 
     /*
@@ -556,30 +623,142 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
     return true;
 }
 
-static
-bool x86_ptw_translate(CPUState *cs, hwaddr gpa, hwaddr *hpa, bool read_only,
-                       int mmu_idx)
+bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
+                       bool debug, int mmu_idx, bool user_access,
+                       const MMUAccessType access_type, uint64_t *page_size,
+                       int *error_code, hwaddr *fault_addr, bool *nested_fault,
+                       int *prot)
 {
+    CPUX86State *env = cpu_env(cs);
     const PageTableLayout *layout;
     hwaddr pt_node = x86_page_table_root(cs, &layout, mmu_idx);
     DecodedPTE pt_entry;
     hwaddr offset = 0;
+    hwaddr real_hpa = 0;
+    uint64_t real_page_size;
+
     vaddr bits_translated = 0;
+    int pg_mode = get_pg_mode(env);
+    bool use_stage2 = env->hflags & HF_GUEST_MASK;
+
+    /*
+     * As we iterate on the page table, accumulate allowed operations, for
+     * a possible TLB refill (e.g., TCG).  Note that we follow the TCG softmmu
+     * code in applying protection keys here; my reading is that one needs to flush
+     * the TLB on any operation that changes a relevant key, which is beyond this
+     * code's purview...
+     */
+    bool user_read_ok = true, user_write_ok = true, user_exec_ok = true;
+    bool super_read_ok = true, super_write_ok = true, super_exec_ok = true;
+
+    memset(&pt_entry, 0, sizeof(pt_entry));
 
     int i = layout->height;
     do {
-        int index = x86_virtual_to_pte_index(cs, gpa, i);
+        int index = x86_virtual_to_pte_index(cs, vaddress, i);
 
-        x86_get_pte(cs, pt_node, index, i, &pt_entry, bits_translated, read_only, mmu_idx);
-
-        if (!pt_entry.present || !pt_entry.reserved_bits_ok) {
+        if (!x86_get_pte(cs, pt_node, index, i, &pt_entry, bits_translated,
+                         debug, mmu_idx, user_access, access_type, error_code,
+                         fault_addr, nested_fault)) {
             return false;
+        }
+
+        if (!pt_entry.present) {
+            if (error_code) {
+                /*
+                 * DEP 7/8/24: My reading of the original code in TCG's x86
+                 * mmu_translate() is that the error code in a not present case
+                 * is zero, but it seems it should set the P mask.
+                 */
+                *error_code = PG_ERROR_P_MASK;
+            }
+            goto fault_out;
+        }
+
+        /* Always check reserved bits */
+        if (!pt_entry.reserved_bits_ok) {
+            if (error_code) {
+                *error_code = PG_ERROR_RSVD_MASK;
+            }
+            goto fault_out;
         }
 
         /* Check if we have hit a leaf.  Won't happen (yet) at heights > 3. */
         if (pt_entry.leaf) {
             assert(i < 4);
             break;
+        }
+
+        /* Always accumulate the permissions on the page table walk. */
+        user_read_ok &= pt_entry.user_read_ok;
+        user_write_ok &= pt_entry.user_write_ok;
+        user_exec_ok &= pt_entry.user_exec_ok;
+        super_read_ok &= pt_entry.super_read_ok;
+        super_write_ok &= pt_entry.super_write_ok;
+        super_exec_ok &= pt_entry.super_exec_ok;
+
+        /* If we are not in debug mode, check permissions before recurring */
+        if (!debug) {
+            if (user_access) {
+                switch (access_type) {
+                case MMU_DATA_LOAD:
+                    if(!pt_entry.user_read_ok) {
+                        if (error_code) {
+                            *error_code = PG_ERROR_U_MASK;
+                        }
+                        goto fault_out;
+                    }
+                    break;
+                case MMU_DATA_STORE:
+                    if(!pt_entry.user_write_ok) {
+                        if (error_code) {
+                            *error_code = PG_ERROR_W_MASK;
+                        }
+                        goto fault_out;
+                    }
+                    break;
+                case MMU_INST_FETCH:
+                    if(!pt_entry.user_exec_ok) {
+                        if (error_code) {
+                            *error_code = PG_ERROR_I_D_MASK;
+                        }
+                        goto fault_out;
+                    }
+                    break;
+                default:
+                    g_assert_not_reached();
+                }
+            } else {
+                switch (access_type) {
+                case MMU_DATA_LOAD:
+                    if(!pt_entry.super_read_ok) {
+                        if (error_code) {
+                            /* Not a distinct super+r mask */
+                            *error_code = PG_ERROR_P_MASK;
+                        }
+                        goto fault_out;
+                    }
+                    break;
+                case MMU_DATA_STORE:
+                    if(!pt_entry.super_write_ok) {
+                        if (error_code) {
+                            *error_code = PG_ERROR_W_MASK;
+                        }
+                        goto fault_out;
+                    }
+                    break;
+                case MMU_INST_FETCH:
+                    if(!pt_entry.super_exec_ok) {
+                        if (error_code) {
+                            *error_code = PG_ERROR_I_D_MASK;
+                        }
+                        goto fault_out;
+                    }
+                    break;
+                default:
+                    g_assert_not_reached();
+                }
+            }
         }
 
         /* Move to the child node */
@@ -589,13 +768,142 @@ bool x86_ptw_translate(CPUState *cs, hwaddr gpa, hwaddr *hpa, bool read_only,
         i--;
     } while (i > 0);
 
+    assert(pt_entry.leaf);
+
+    /* Some x86 protection checks are leaf-specific */
+
+    /* Apply MPK at end, only on non-nested page tables */
+    if (mmu_idx == 0) {
+        /* MPK */
+        uint32_t pkr;
+
+        /* Is this a user-mode mapping? */
+        if (user_read_ok) {
+            pkr = pg_mode & PG_MODE_PKE ? env->pkru : 0;
+        } else {
+            pkr = pg_mode & PG_MODE_PKS ? env->pkrs : 0;
+        }
+
+        if (pkr) {
+            uint32_t pk = (pt_entry.pte_contents & PG_PKRU_MASK)
+                >> PG_PKRU_BIT;
+            /*
+             * Follow the TCG pattern here of applying these bits
+             * to the protection, which may be fed to the TLB.
+             * My reading is that it is not safe to cache this across
+             * changes to these registers...
+             */
+            uint32_t pkr_ad = (pkr >> pk * 2) & 1;
+            uint32_t pkr_wd = (pkr >> pk * 2) & 2;
+
+            if (pkr_ad) {
+                super_read_ok = false;
+                user_read_ok = false;
+                super_write_ok = false;
+                user_write_ok = false;
+
+                if (debug) {
+                    if (access_type == MMU_DATA_LOAD
+                        || access_type == MMU_DATA_STORE) {
+                        if (error_code) {
+                            *error_code = PG_ERROR_PK_MASK | PG_ERROR_P_MASK;
+                            if (user_access) {
+                                *error_code |= PG_ERROR_U_MASK;
+                            }
+                        }
+                        goto fault_out;
+
+                    }
+                }
+            }
+
+            if (pkr_wd) {
+                user_write_ok = false;
+                if (pg_mode & PG_MODE_WP) {
+                    super_write_ok = false;
+                }
+                if (debug) {
+                    if (access_type == MMU_DATA_STORE
+                        && (user_access || pg_mode & PG_MODE_WP)) {
+                        if (error_code) {
+                            *error_code = PG_ERROR_PK_MASK | PG_ERROR_P_MASK;
+                            if (user_access) {
+                                *error_code |= PG_ERROR_U_MASK;
+                            }
+                        }
+                        goto fault_out;
+                    }
+                }
+            }
+        }
+    }
+
+    real_page_size = pt_entry.leaf_page_size;
     /* Add offset bits back to hpa */
-    offset = gpa & (pt_entry.leaf_page_size - 1);
+    offset = vaddress & (pt_entry.leaf_page_size - 1);
+    real_hpa = pt_entry.child | offset;
+
+    /* In the event of nested paging, we need to recur one last time on the child
+     * address to resolve the host address.  Also, if the nested page size is larger
+     * use that for a TLB consumer.  Recursion with the offset bits added in
+     * should do the right thing if the nested page sizes differ.
+     */
+
+    if (mmu_idx == 0 && use_stage2) {
+        vaddr gpa = pt_entry.child | offset;
+        uint64_t nested_page_size = 0;
+        if (!x86_ptw_translate(cs, gpa, &real_hpa,
+                               debug, 1, user_access, access_type,
+                               &nested_page_size, error_code, fault_addr,
+                               nested_fault, prot)) {
+            return false;
+        }
+
+        if (real_page_size < nested_page_size) {
+            real_page_size = nested_page_size;
+        }
+    }
 
     if (hpa) {
-        *hpa = pt_entry.child | offset;
+        *hpa = real_hpa;
     }
+
+    if (page_size) {
+        *page_size = real_page_size;
+    }
+
+    if (prot) {
+        if (user_access) {
+            if (user_read_ok) {
+                *prot |= PAGE_READ;
+            }
+            if (user_write_ok) {
+                *prot |= PAGE_WRITE;
+            }
+            if (user_exec_ok) {
+                *prot |= PAGE_EXEC;
+            }
+        } else {
+            if (super_read_ok) {
+                *prot |= PAGE_READ;
+            }
+            if (super_write_ok) {
+                *prot |= PAGE_WRITE;
+            }
+            if (super_exec_ok) {
+                *prot |= PAGE_EXEC;
+            }
+        }
+    }
+
     return true;
+
+ fault_out:
+    if (fault_addr) {
+        *fault_addr = vaddress;
+    }
+    return false;
+
 }
 
 struct memory_mapping_data {
@@ -626,5 +934,5 @@ static int add_memory_mapping_to_list(CPUState *cs, void *data, DecodedPTE *pte,
 bool x86_cpu_get_memory_mapping(CPUState *cs, MemoryMappingList *list,
                                 Error **errp)
 {
-    return for_each_pte(cs, &add_memory_mapping_to_list, list, false, false, false, true, 0);
+    return for_each_pte(cs, &add_memory_mapping_to_list, list, false, false, false, 0);
 }

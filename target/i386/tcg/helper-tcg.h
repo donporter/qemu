@@ -103,7 +103,7 @@ typedef enum TranslateFaultStage2 {
 typedef struct TranslateFault {
     int exception_index;
     int error_code;
-    target_ulong cr2;
+    hwaddr cr2;
     TranslateFaultStage2 stage2;
 } TranslateFault;
 

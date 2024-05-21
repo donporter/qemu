@@ -160,19 +160,35 @@ typedef struct SysemuCPUOps {
      * @vaddr_parent - The virtual address bits already translated in
      *                 walking the page table to node.  Optional: only
      *                 used if vaddr_pte is set.
-     * @read_only - If true, do not update softmmu state (if applicable) to reflect
+     * @debug - If true, do not update softmmu state (if applicable) to reflect
      *              the page table walk.
      * @mmu_idx - Which level of the mmu we are interested in:
      *            0 == user mode, 1 == nested page table
      *            Note that MMU_*_IDX macros are not consistent across
      *            architectures.
+     * @user_access - For non-debug accesses, true if a user mode access, false
+     *                if supervisor mode access.  Used to determine faults.
+     * @access_type - For non-debug accesses, what type of access is driving the
+     *                lookup.  Used to determine faults.
+     * @error_code - Optional integer pointer, to store error reason on failure
+     * @fault_addr - Optional vaddr pointer, to store the faulting address on a
+     *               recursive page walk for the pe.  Otherwise, caller is expected
+     *               to determine if this pte access would fault.
+     * @nested_fault - Optional boolean pointer, to differentiate nested faults.
+     *                 Set to true if there is a fault recurring on a nested page
+     *                 table.
      *
-     * Returns true on success, false on failure
+     * Returns true on success, false on failure.  This should only fail if a page table
+     * entry cannot be read because the address of node is not a valid (guest) physical
+     * address.  Otherwise, we capture errors like bad reserved flags in the DecodedPTE
+     * entry and let the caller decide how to handle it.
      */
 
     bool (*get_pte)(CPUState *cs, hwaddr node, int i, int height,
-                    DecodedPTE *pt_entry, vaddr vaddr_parent, bool read_only,
-                    int mmu_idx);
+                    DecodedPTE *pt_entry, vaddr vaddr_parent, bool debug,
+                    int mmu_idx, bool user_access,
+                    const MMUAccessType access_type, int *error_code,
+                    hwaddr *fault_addr, bool *nested_fault);
 
     /**
      * @mon_init_page_table_iterator: Callback to configure a page table

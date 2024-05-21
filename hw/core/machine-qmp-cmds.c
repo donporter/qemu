@@ -572,7 +572,7 @@ void query_page_helper(GString *buf, CPUState *cpu, int mmu_idx, bool nested) {
      * We must visit interior entries to get the hierarchy, but
      * can skip not present mappings
      */
-    for_each_pte(cpu, &compressing_iterator, &state, true, false, true, true,
+    for_each_pte(cpu, &compressing_iterator, &state, true, false, true,
                  mmu_idx);
 
     /* Print last entry, if one present */

@@ -168,8 +168,6 @@ GuestPanicInformation *cpu_get_crash_info(CPUState *cpu)
  *          table to node
  * @height - The height of the node in the radix tree
  * @layout- The layout of the radix tree
- * @read_only - If true, do not update softmmu state (if applicable)
- *              to reflect the page table walk.
  * @mmu_idx - Which level of the mmu we are interested in:
  *            0 == user mode, 1 == nested page table
  *            Note that MMU_*_IDX macros are not consistent across
@@ -186,7 +184,7 @@ for_each_pte_recursive(CPUState *cs, qemu_page_walker_for_each fn, void *data,
                        bool visit_interior_nodes, bool visit_not_present,
                        bool visit_malformed, hwaddr node, vaddr vaddr_in,
                        int height, const PageTableLayout *layout,
-                       bool read_only, int mmu_idx)
+                       int mmu_idx)
 {
     int i;
     CPUClass *cc = cs->cc;
@@ -198,8 +196,12 @@ for_each_pte_recursive(CPUState *cs, qemu_page_walker_for_each fn, void *data,
     for (i = 0; i < ptes_per_node; i++) {
         DecodedPTE pt_entry;
 
-        if(!ops->get_pte(cs, node, i, height, &pt_entry, vaddr_in, read_only,
-                         mmu_idx)) {
+        memset(&pt_entry, 0, sizeof(pt_entry));
+
+        /* For now, let's assume we don't enumerate a page table except
+         * in debug mode, so the access type should be irrelevant */
+        if(!ops->get_pte(cs, node, i, height, &pt_entry, vaddr_in, true,
+                         mmu_idx, false, MMU_DATA_LOAD, NULL, NULL, NULL)) {
             /* Fail if we can't read the PTE */
             return false;
         }
@@ -232,7 +234,7 @@ for_each_pte_recursive(CPUState *cs, qemu_page_walker_for_each fn, void *data,
                                                 visit_malformed,
                                                 pt_entry.child,
                                                 pt_entry.bits_translated,
-                                                height - 1, layout, read_only,
+                                                height - 1, layout,
                                                 mmu_idx)) {
                         return false;
                     }
@@ -265,8 +267,6 @@ for_each_pte_recursive(CPUState *cs, qemu_page_walker_for_each fn, void *data,
  * @visit_malformed - if true, call fn() on entries that are malformed (e.g.,
  *                         bad reserved bits.  Even if true, will not follow
  *                         a child pointer to another node.
- * @read_only - If true, do not update softmmu state (if applicable) to reflect
- *              the page table walk.
  * @mmu_idx - Which level of the mmu we are interested in:
  *            0 == user mode, 1 == nested page table
  *            Note that MMU_*_IDX macros are not consistent across
@@ -277,7 +277,7 @@ for_each_pte_recursive(CPUState *cs, qemu_page_walker_for_each fn, void *data,
  */
 bool for_each_pte(CPUState *cs, qemu_page_walker_for_each fn, void *data,
                   bool visit_interior_nodes, bool visit_not_present,
-                  bool visit_malformed, bool read_only, int mmu_idx)
+                  bool visit_malformed, int mmu_idx)
 {
     vaddr vaddr = 0;
     hwaddr root;
@@ -301,7 +301,6 @@ bool for_each_pte(CPUState *cs, qemu_page_walker_for_each fn, void *data,
     /* Recursively call a helper to walk the page table */
     return for_each_pte_recursive(cs, fn, data, visit_interior_nodes,
                                   visit_not_present, visit_malformed, root,
-                                  vaddr, layout->height, layout, read_only,
-                                  mmu_idx);
+                                  vaddr, layout->height, layout, mmu_idx);
 
 }
