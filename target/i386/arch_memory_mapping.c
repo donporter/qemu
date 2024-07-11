@@ -266,6 +266,9 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
     int pg_mode = get_pg_mode(env);
     bool pae_enabled = !!(pg_mode & PG_MODE_PAE);
     bool long_mode = !!(pg_mode & PG_MODE_LMA);
+#ifdef CONFIG_TCG
+    void *pte_internal_pointer = NULL;
+#endif
 
     pt_entry->reserved_bits_ok = false;
 
@@ -276,10 +279,11 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
 
     pte = (node + (i * pte_width)) & a20_mask;
 
-    /* Recur on nested paging */
-    if (mmu_idx == 0 && use_stage2) {
+    if (debug) {
 
-        if (debug) {
+        /* Recur on nested paging */
+        if (mmu_idx == 0 && use_stage2) {
+
             bool ok = x86_ptw_translate(cs, pte, &pte_host_addr, debug, 1,
                                         user_access, access_type, NULL,
                                         error_code, fault_addr, NULL, NULL);
@@ -290,34 +294,38 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
                 return false;
             }
         } else {
-#ifdef CONFIG_TCG
-            CPUTLBEntryFull *full;
-            void *tmp;
-            int flags = probe_access_full(env, pte, 0, MMU_DATA_STORE,
-                                          MMU_NESTED_IDX, true,
-                                          &tmp, &full, unused);
-
-            if (unlikely(flags & TLB_INVALID_MASK)) {
-                if (nested_fault) {
-                    *nested_fault = true;
-                }
-                if (error_code) {
-                    *error_code = env->error_code;
-                }
-                if (fault_addr) {
-                    *fault_addr = pte;
-                }
-                return false;
-            }
-
-            pte_host_addr = (hwaddr) tmp;
-#else
-            /* Any non-TCG use case should be read-only */
-            g_assert_not_reached();
-#endif
+            pte_host_addr = pte;
         }
     } else {
-        pte_host_addr = pte;
+#ifdef CONFIG_TCG
+        CPUTLBEntryFull *full;
+        int flags = probe_access_full(env, pte, 0, MMU_DATA_STORE,
+                                      MMU_NESTED_IDX, true,
+                                      &pte_internal_pointer, &full,
+                                      unused);
+
+        if (unlikely(flags & TLB_INVALID_MASK)) {
+            if (nested_fault) {
+                *nested_fault = true;
+            }
+            if (error_code) {
+                *error_code = env->error_code;
+            }
+            if (fault_addr) {
+                *fault_addr = pte;
+            }
+            return false;
+        }
+
+        pte_host_addr = full->phys_addr;
+        /* probe_access_full() drops the offset bits; we need to re-add them */
+        pte_host_addr += i * pte_width;
+        /* But don't re-add to pte_internal_pointer, which overlaps with
+         * pte_host_addr... */
+#else
+        /* Any non-TCG use case should be read-only */
+        g_assert_not_reached();
+#endif
     }
 #ifdef CONFIG_TCG
     /*
@@ -351,7 +359,12 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
             bool smep_enabled = !!(pg_mode & PG_MODE_SMEP);
 
             pt_entry->super_read_ok = true;
-            pt_entry->super_write_ok = !!(pte_contents & PG_RW_MASK);
+            if (pg_mode & PG_MODE_WP) {
+                pt_entry->super_write_ok = !!(pte_contents & PG_RW_MASK);
+            } else {
+                pt_entry->super_write_ok = true;
+            }
+
             if (nx_enabled) {
                 if (smep_enabled) {
                     pt_entry->super_exec_ok = !(pte_contents & PG_USER_MASK);
@@ -366,7 +379,7 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
 
             if ((pte_contents & PG_USER_MASK)) {
                 pt_entry->user_read_ok = true;
-                pt_entry->user_write_ok = pt_entry->super_write_ok;
+                pt_entry->user_write_ok = !!(pte_contents & PG_RW_MASK);
             }
         }
 
@@ -542,10 +555,11 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
 #ifdef CONFIG_TCG
             TranslateFault err;
             PTETranslate pte_trans = {
-                .gaddr = pte,
-                .haddr = (void *)pte_host_addr,
+                .gaddr = pte_host_addr,
+                .haddr = pte_internal_pointer,
                 .env = env,
                 .err = &err,
+                .ptw_idx = MMU_PHYS_IDX, /* We already recurred */
             };
 
             /* If this is a leaf and a store, set the dirty bit too */
@@ -554,8 +568,7 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
                 if (pt_entry->leaf && access_type == MMU_DATA_STORE) {
                     set |= PG_DIRTY_MASK;
                 }
-                pte_trans.ptw_idx = use_stage2 ? MMU_NESTED_IDX : MMU_PHYS_IDX;
-                if(!ptw_setl(&pte_trans, pte, set)) {
+                if(!ptw_setl(&pte_trans, pte_contents, set)) {
                     goto reread_pte;
                 }
             } else if (mmu_idx == 1) {
@@ -565,8 +578,7 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
                     if (pt_entry->leaf && access_type == MMU_DATA_STORE) {
                         set |= PG_EPT_DIRTY_MASK;
                     }
-                    pte_trans.ptw_idx = MMU_PHYS_IDX;
-                    if(!ptw_setl(&pte_trans, pte, PG_EPT_ACCESSED_MASK)) {
+                    if(!ptw_setl(&pte_trans, pte_contents, set)) {
                         goto reread_pte;
                     }
                 }
@@ -651,11 +663,11 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
     bool user_read_ok = true, user_write_ok = true, user_exec_ok = true;
     bool super_read_ok = true, super_write_ok = true, super_exec_ok = true;
 
-    memset(&pt_entry, 0, sizeof(pt_entry));
-
     int i = layout->height;
     do {
         int index = x86_virtual_to_pte_index(cs, vaddress, i);
+
+        memset(&pt_entry, 0, sizeof(pt_entry));
 
         if (!x86_get_pte(cs, pt_node, index, i, &pt_entry, bits_translated,
                          debug, mmu_idx, user_access, access_type, error_code,
@@ -802,7 +814,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                 super_write_ok = false;
                 user_write_ok = false;
 
-                if (debug) {
+                if (!debug) {
                     if (access_type == MMU_DATA_LOAD
                         || access_type == MMU_DATA_STORE) {
                         if (error_code) {
@@ -822,7 +834,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                 if (pg_mode & PG_MODE_WP) {
                     super_write_ok = false;
                 }
-                if (debug) {
+                if (!debug) {
                     if (access_type == MMU_DATA_STORE
                         && (user_access || pg_mode & PG_MODE_WP)) {
                         if (error_code) {
@@ -873,6 +885,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
     }
 
     if (prot) {
+        *prot = 0;
         if (user_access) {
             if (user_read_ok) {
                 *prot |= PAGE_READ;

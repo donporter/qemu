@@ -287,6 +287,11 @@ void hmp_info_tlb(Monitor *mon, const QDict *qdict)
         return;
     }
 
+    if(!cpu_paging_enabled(cs, 0)) {
+        monitor_printf(mon, "PG disabled\n");
+        return;
+    }
+
     CPUClass *cc = CPU_GET_CLASS(cs);
 
     if (!cc->sysemu_ops->mon_print_pte
@@ -310,7 +315,6 @@ void hmp_info_tlb(Monitor *mon, const QDict *qdict)
 
     }
 }
-
 bool x86_mon_print_mem(CPUState *cs, struct mem_print_state *state)
 {
     CPUArchState *env = state->env;
@@ -392,6 +396,11 @@ void hmp_info_mem(Monitor *mon, const QDict *qdict)
 
     if (!cs) {
         monitor_printf(mon, "Unable to get CPUState.  Internal error\n");
+        return;
+    }
+
+    if(!cpu_paging_enabled(cs, 0)) {
+        monitor_printf(mon, "PG disabled\n");
         return;
     }
 
