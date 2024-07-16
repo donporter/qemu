@@ -243,7 +243,8 @@ hwaddr x86_cpu_get_phys_page_attrs_debug(CPUState *cs, vaddr addr,
     *attrs = cpu_get_mem_attrs(env);
 
     if (!cpu_paging_enabled(cs, 0)) {
-        return -1;
+        int32_t a20_mask = x86_get_a20_mask(env);
+        return addr & a20_mask;
     }
 
     /* This function merges the offset bits for us */
