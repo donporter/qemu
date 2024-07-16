@@ -239,7 +239,7 @@ int x86_virtual_to_pte_index(CPUState *cs, vaddr vaddr_in, int height)
  * @fault_addr - Optional vaddr pointer, to store the faulting address on a
  *               recursive page walk for the pe.  Otherwise, caller is expected
  *               to determine if this pte access would fault.
- * @nested_fault - Optional boolean pointer, to differentiate nested faults.
+ * @nested_fault - Optional pointer, to differentiate causes of nested faults.
  *                 Set to true if there is a fault recurring on a nested page
  *                 table.
  *
@@ -252,7 +252,7 @@ bool
 x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
             vaddr vaddr_parent, bool debug, int mmu_idx, bool user_access,
             const MMUAccessType access_type, int *error_code,
-            vaddr *fault_addr, bool *nested_fault)
+            vaddr *fault_addr, TranslateFaultStage2 *nested_fault)
 {
     CPUX86State *env = cpu_env(cs);
     int32_t a20_mask = x86_get_a20_mask(env);
@@ -289,7 +289,7 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
                                         error_code, fault_addr, NULL, NULL);
             if (!ok) {
                 if (nested_fault) {
-                    *nested_fault = true;
+                    *nested_fault = S2_GPT;
                 }
                 return false;
             }
@@ -306,7 +306,7 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
 
         if (unlikely(flags & TLB_INVALID_MASK)) {
             if (nested_fault) {
-                *nested_fault = true;
+                *nested_fault = S2_GPT;
             }
             if (error_code) {
                 *error_code = env->error_code;
@@ -499,6 +499,7 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
 
         /* Check reserved bits */
         uint64_t rsvd_mask = ~MAKE_64BIT_MASK(0, env_archcpu(env)->phys_bits);
+        rsvd_mask &= PG_ADDRESS_MASK;
 
         if (mmu_idx == 0
             || (mmu_idx == 1 && env->vm_state_valid &&
@@ -638,7 +639,7 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
 bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                        bool debug, int mmu_idx, bool user_access,
                        const MMUAccessType access_type, uint64_t *page_size,
-                       int *error_code, hwaddr *fault_addr, bool *nested_fault,
+                       int *error_code, hwaddr *fault_addr, TranslateFaultStage2 *nested_fault,
                        int *prot)
 {
     CPUX86State *env = cpu_env(cs);
@@ -662,6 +663,11 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
      */
     bool user_read_ok = true, user_write_ok = true, user_exec_ok = true;
     bool super_read_ok = true, super_write_ok = true, super_exec_ok = true;
+
+    /* Ensure nested_fault is initialized properly */
+    if (nested_fault) {
+        *nested_fault = S2_NONE;
+    }
 
     int i = layout->height;
     do {
@@ -868,6 +874,9 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                                debug, 1, user_access, access_type,
                                &nested_page_size, error_code, fault_addr,
                                nested_fault, prot)) {
+            if (nested_fault) {
+                *nested_fault = S2_GPA;
+            }
             return false;
         }
 

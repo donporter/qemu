@@ -47,6 +47,11 @@ struct mem_print_state {
     int last_offset[MAX_HEIGHT + 1]; /* PTE range ending offsets */
 };
 
+typedef enum TranslateFaultStage2 {
+    S2_NONE,
+    S2_GPA,
+    S2_GPT,
+} TranslateFaultStage2;
 
 /*
  * struct SysemuCPUOps: System operations specific to a CPU class
@@ -174,7 +179,7 @@ typedef struct SysemuCPUOps {
      * @fault_addr - Optional vaddr pointer, to store the faulting address on a
      *               recursive page walk for the pe.  Otherwise, caller is expected
      *               to determine if this pte access would fault.
-     * @nested_fault - Optional boolean pointer, to differentiate nested faults.
+     * @nested_fault - Optional pointer, to differentiate causes of nested faults.
      *                 Set to true if there is a fault recurring on a nested page
      *                 table.
      *
@@ -188,7 +193,7 @@ typedef struct SysemuCPUOps {
                     DecodedPTE *pt_entry, vaddr vaddr_parent, bool debug,
                     int mmu_idx, bool user_access,
                     const MMUAccessType access_type, int *error_code,
-                    hwaddr *fault_addr, bool *nested_fault);
+                    hwaddr *fault_addr, TranslateFaultStage2 *nested_fault);
 
     /**
      * @mon_init_page_table_iterator: Callback to configure a page table

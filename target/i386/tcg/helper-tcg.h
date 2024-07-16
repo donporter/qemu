@@ -94,12 +94,6 @@ void cpu_load_eflags(CPUX86State *env, int eflags, int update_mask);
 G_NORETURN void do_pause(CPUX86State *env);
 
 /* sysemu/excp_helper.c */
-typedef enum TranslateFaultStage2 {
-    S2_NONE,
-    S2_GPA,
-    S2_GPT,
-} TranslateFaultStage2;
-
 typedef struct TranslateFault {
     int exception_index;
     int error_code;

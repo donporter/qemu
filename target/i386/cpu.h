@@ -2194,7 +2194,7 @@ hwaddr x86_page_table_root(CPUState *cs, const PageTableLayout **layout,
 bool x86_get_pte(CPUState *cs, hwaddr node, int i, int height,
                  DecodedPTE *pt_entry, vaddr vaddr_parent, bool debug,
                  int mmu_idx, bool user_access, const MMUAccessType access_type,
-                 int *error_code, hwaddr *fault_addr, bool *nested_fault);
+                 int *error_code, hwaddr *fault_addr, TranslateFaultStage2 *nested_fault);
 int x86_virtual_to_pte_index(CPUState *cs, vaddr vaddr_in, int height);
 bool x86_cpu_get_memory_mapping(CPUState *cpu, MemoryMappingList *list,
                                 Error **errp);
@@ -2208,7 +2208,7 @@ bool x86_mon_print_mem(CPUState *cs, struct mem_print_state *state);
 bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                        bool debug, int mmu_idx, bool user_access,
                        const MMUAccessType access_type, uint64_t *page_size,
-                       int *error_code, hwaddr *fault_addr, bool *nested_fault,
+                       int *error_code, hwaddr *fault_addr, TranslateFaultStage2 *nested_fault,
                        int *prot);
 
 void x86_cpu_dump_state(CPUState *cs, FILE *f, int flags);
