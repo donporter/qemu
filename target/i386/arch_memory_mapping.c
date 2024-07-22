@@ -728,12 +728,6 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
             goto fault_out;
         }
 
-        /* Check if we have hit a leaf.  Won't happen (yet) at heights > 3. */
-        if (pt_entry.leaf) {
-            assert(i < 4);
-            break;
-        }
-
         /* Always accumulate the permissions on the page table walk. */
         user_read_ok &= pt_entry.user_read_ok;
         user_write_ok &= pt_entry.user_write_ok;
@@ -804,6 +798,12 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                     g_assert_not_reached();
                 }
             }
+        }
+
+        /* Check if we have hit a leaf.  Won't happen (yet) at heights > 3. */
+        if (pt_entry.leaf) {
+            assert(i < 4);
+            break;
         }
 
         /* Move to the child node */
