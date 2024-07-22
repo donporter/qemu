@@ -31,7 +31,6 @@
 #include "qapi/error.h"
 #include "qapi/qmp/qdict.h"
 #include "sysemu/hw_accel.h"
-#include "hw/core/sysemu-cpu-ops.h"
 
 /* Set the current CPU defined by the user. Callers must hold BQL. */
 int monitor_set_cpu(Monitor *mon, int cpu_index)
@@ -120,7 +119,6 @@ void hmp_info_registers(Monitor *mon, const QDict *qdict)
         cpu_dump_state(cs, NULL, CPU_DUMP_FPU);
     }
 }
-
 
 static void memory_dump(Monitor *mon, int count, int format, int wsize,
                         hwaddr addr, int is_physical)
