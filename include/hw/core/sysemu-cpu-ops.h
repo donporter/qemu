@@ -12,6 +12,12 @@
 
 #include "hw/core/cpu.h"
 
+typedef enum TranslateFaultStage2 {
+    S2_NONE,
+    S2_GPA,
+    S2_GPT,
+} TranslateFaultStage2;
+
 /*
  * struct SysemuCPUOps: System operations specific to a CPU class
  */

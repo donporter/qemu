@@ -21,6 +21,7 @@
 #define I386_CPU_H
 
 #include "sysemu/tcg.h"
+#include "hw/core/sysemu-cpu-ops.h"
 #include "cpu-qom.h"
 #include "kvm/hyperv-proto.h"
 #include "exec/cpu-defs.h"
@@ -2362,6 +2363,7 @@ void host_cpuid(uint32_t function, uint32_t count,
 bool cpu_has_x2apic_feature(CPUX86State *env);
 
 /* helper.c */
+int get_pg_mode(CPUX86State *env);
 void x86_cpu_set_a20(X86CPU *cpu, int a20_state);
 void cpu_sync_avx_hflag(CPUX86State *env);
 
@@ -2539,9 +2541,6 @@ static inline bool cpu_vmx_maybe_enabled(CPUX86State *env)
     return cpu_has_vmx(env) &&
            ((env->cr[4] & CR4_VMXE_MASK) || (env->hflags & HF_SMM_MASK));
 }
-
-/* excp_helper.c */
-int get_pg_mode(CPUX86State *env);
 
 /* fpu_helper.c */
 void update_fp_status(CPUX86State *env);
