@@ -693,6 +693,7 @@ typedef struct DecodedPTE {
     bool super_read_ok;
     bool super_write_ok;
     bool super_exec_ok;
+    bool dirty;
     hwaddr child; /* Only valid if present and !leaf */
     uint64_t leaf_page_size; /* Only valid if present and leaf */
     uint64_t nested_page_size; /*

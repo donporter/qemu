@@ -2209,7 +2209,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                        bool debug, int mmu_idx, bool user_access,
                        const MMUAccessType access_type, uint64_t *page_size,
                        int *error_code, hwaddr *fault_addr, TranslateFaultStage2 *nested_fault,
-                       int *prot);
+                       int *prot, bool *dirty);
 
 void x86_cpu_dump_state(CPUState *cs, FILE *f, int flags);
 

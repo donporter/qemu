@@ -286,7 +286,7 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
 
             bool ok = x86_ptw_translate(cs, pte, &pte_host_addr, debug, 1,
                                         user_access, access_type, NULL,
-                                        error_code, fault_addr, NULL, NULL);
+                                        error_code, fault_addr, NULL, NULL, NULL);
             if (!ok) {
                 if (nested_fault) {
                     *nested_fault = S2_GPT;
@@ -377,15 +377,24 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
                 pt_entry->user_exec_ok = !(pte_contents & PG_USER_MASK);
             }
 
-            if ((pte_contents & PG_USER_MASK)) {
+            if (pte_contents & PG_USER_MASK) {
                 pt_entry->user_read_ok = true;
                 pt_entry->user_write_ok = !!(pte_contents & PG_RW_MASK);
             }
+
+            pt_entry->dirty = !!(pte_contents & PG_DIRTY_MASK);
         }
 
         pt_entry->prot = pte_contents & (PG_USER_MASK | PG_RW_MASK |
                                          PG_PRESENT_MASK);
-        leaf_mask = PG_PSE_MASK;
+
+
+
+        /* In 32-bit mode without PAE, we need to check the PSE flag in cr4 */
+        if (long_mode || pae_enabled || pg_mode & PG_MODE_PSE) {
+            leaf_mask = PG_PSE_MASK;
+        }
+
     } else if (mmu_idx == 1) {
         uint64_t mask = PG_EPT_PRESENT_MASK;
         /*
@@ -408,6 +417,8 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
             } else {
                 pt_entry->user_exec_ok = pt_entry->super_exec_ok;
             }
+
+            pt_entry->dirty = !!(pte_contents & PG_DIRTY_MASK);
         }
         pt_entry->prot = pte_contents & (PG_EPT_PRESENT_MASK | PG_EPT_X_USER_MASK);
         leaf_mask = PG_EPT_PSE_MASK;
@@ -416,7 +427,9 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
     }
 
     if (pt_entry->present) {
-        pt_entry->leaf = (height == 1 || pte_contents & leaf_mask);
+        pt_entry->leaf = (height == 1 ||
+                          pte_contents & leaf_mask);
+
         /* Sanity checks */
         if (pt_entry->leaf) {
             switch (height) {
@@ -472,7 +485,8 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
         case 2:
             if (pt_entry->leaf) {
                 if (pae_enabled) {
-                    pt_entry->child = (pte_contents & ~0x1fffff);
+                    /* Select bits 21--51 */
+                    pt_entry->child = (pte_contents & 0xfffffffe00000);
                 } else {
                     /*
                      * 4 MB page:
@@ -515,8 +529,10 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
             if (!long_mode) {
                 if (pae_enabled) {
                     rsvd_mask |= PG_HI_USER_MASK;
-                } else {
+                } else if (!pae_enabled && height == 2 && pt_entry->leaf) {
                     rsvd_mask = 0x200000;
+                } else {
+                    rsvd_mask = 0;
                 }
             }
 
@@ -640,7 +656,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                        bool debug, int mmu_idx, bool user_access,
                        const MMUAccessType access_type, uint64_t *page_size,
                        int *error_code, hwaddr *fault_addr, TranslateFaultStage2 *nested_fault,
-                       int *prot)
+                       int *prot, bool *dirty)
 {
     CPUX86State *env = cpu_env(cs);
     const PageTableLayout *layout;
@@ -664,6 +680,11 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
     bool user_read_ok = true, user_write_ok = true, user_exec_ok = true;
     bool super_read_ok = true, super_write_ok = true, super_exec_ok = true;
 
+    /* Initialize the error code to 0 */
+    if (error_code) {
+        *error_code = 0;
+    }
+
     /* Ensure nested_fault is initialized properly */
     if (nested_fault) {
         *nested_fault = S2_NONE;
@@ -683,12 +704,18 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
 
         if (!pt_entry.present) {
             if (error_code) {
-                /*
-                 * DEP 7/8/24: My reading of the original code in TCG's x86
-                 * mmu_translate() is that the error code in a not present case
-                 * is zero, but it seems it should set the P mask.
-                 */
-                *error_code = PG_ERROR_P_MASK;
+                /* Set the P bit to zero */
+                if (error_code) {
+                    *error_code &= ~PG_ERROR_P_MASK;
+                    if (user_access) {
+                        *error_code |= PG_ERROR_U_MASK;
+                    }
+                    if (access_type == MMU_DATA_STORE) {
+                        *error_code |= PG_ERROR_W_MASK;
+                    } else if (access_type == MMU_INST_FETCH) {
+                        *error_code |= PG_ERROR_I_D_MASK;
+                    }
+                }
             }
             goto fault_out;
         }
@@ -696,7 +723,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
         /* Always check reserved bits */
         if (!pt_entry.reserved_bits_ok) {
             if (error_code) {
-                *error_code = PG_ERROR_RSVD_MASK;
+                *error_code |= PG_ERROR_RSVD_MASK;
             }
             goto fault_out;
         }
@@ -722,7 +749,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                 case MMU_DATA_LOAD:
                     if(!pt_entry.user_read_ok) {
                         if (error_code) {
-                            *error_code = PG_ERROR_U_MASK;
+                            *error_code |= PG_ERROR_U_MASK | PG_ERROR_P_MASK;
                         }
                         goto fault_out;
                     }
@@ -730,7 +757,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                 case MMU_DATA_STORE:
                     if(!pt_entry.user_write_ok) {
                         if (error_code) {
-                            *error_code = PG_ERROR_W_MASK;
+                            *error_code |= PG_ERROR_P_MASK | PG_ERROR_W_MASK | PG_ERROR_U_MASK;
                         }
                         goto fault_out;
                     }
@@ -738,7 +765,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                 case MMU_INST_FETCH:
                     if(!pt_entry.user_exec_ok) {
                         if (error_code) {
-                            *error_code = PG_ERROR_I_D_MASK;
+                            *error_code = PG_ERROR_P_MASK | PG_ERROR_I_D_MASK | PG_ERROR_U_MASK;
                         }
                         goto fault_out;
                     }
@@ -752,7 +779,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                     if(!pt_entry.super_read_ok) {
                         if (error_code) {
                             /* Not a distinct super+r mask */
-                            *error_code = PG_ERROR_P_MASK;
+                            *error_code |= PG_ERROR_P_MASK;
                         }
                         goto fault_out;
                     }
@@ -760,7 +787,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                 case MMU_DATA_STORE:
                     if(!pt_entry.super_write_ok) {
                         if (error_code) {
-                            *error_code = PG_ERROR_W_MASK;
+                            *error_code = PG_ERROR_P_MASK | PG_ERROR_W_MASK;
                         }
                         goto fault_out;
                     }
@@ -768,7 +795,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                 case MMU_INST_FETCH:
                     if(!pt_entry.super_exec_ok) {
                         if (error_code) {
-                            *error_code = PG_ERROR_I_D_MASK;
+                            *error_code = PG_ERROR_P_MASK | PG_ERROR_I_D_MASK;
                         }
                         goto fault_out;
                     }
@@ -824,7 +851,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                     if (access_type == MMU_DATA_LOAD
                         || access_type == MMU_DATA_STORE) {
                         if (error_code) {
-                            *error_code = PG_ERROR_PK_MASK | PG_ERROR_P_MASK;
+                            *error_code |= PG_ERROR_PK_MASK | PG_ERROR_P_MASK;
                             if (user_access) {
                                 *error_code |= PG_ERROR_U_MASK;
                             }
@@ -844,7 +871,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                     if (access_type == MMU_DATA_STORE
                         && (user_access || pg_mode & PG_MODE_WP)) {
                         if (error_code) {
-                            *error_code = PG_ERROR_PK_MASK | PG_ERROR_P_MASK;
+                            *error_code |= PG_ERROR_PK_MASK | PG_ERROR_P_MASK;
                             if (user_access) {
                                 *error_code |= PG_ERROR_U_MASK;
                             }
@@ -870,10 +897,15 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
     if (mmu_idx == 0 && use_stage2) {
         vaddr gpa = pt_entry.child | offset;
         uint64_t nested_page_size = 0;
+
+        if (error_code) {
+            assert(error_code == 0);
+        }
+
         if (!x86_ptw_translate(cs, gpa, &real_hpa,
                                debug, 1, user_access, access_type,
                                &nested_page_size, error_code, fault_addr,
-                               nested_fault, prot)) {
+                               nested_fault, prot, NULL)) {
             if (nested_fault) {
                 *nested_fault = S2_GPA;
             }
@@ -916,6 +948,10 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                 *prot |= PAGE_EXEC;
             }
         }
+    }
+
+    if (dirty) {
+        *dirty = pt_entry.dirty;
     }
 
     return true;

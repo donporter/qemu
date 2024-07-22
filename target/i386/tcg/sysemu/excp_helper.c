@@ -81,20 +81,29 @@ static bool mmu_translate(CPUX86State *env, const TranslateParams *in,
     const target_ulong addr = in->addr;
     hwaddr paddr;
     CPUState *cs = env_cpu(env);
+    bool dirty = false;
 
     bool ok = x86_ptw_translate(cs, addr, &paddr, false,
                                 in->ptw_idx == MMU_NESTED_IDX ? 1 : 0,
                                 is_mmu_index_user(in->mmu_idx), in->access_type,
                                 &out->page_size,
-                                &err->error_code, (hwaddr *) &err->cr2, &err->stage2, &out->prot);
+                                &err->error_code, (hwaddr *) &err->cr2, &err->stage2, &out->prot, &dirty);
     if (!ok) {
 
         err->exception_index = EXCP0E_PAGE;
         return false;
     }
 
+    /*
+     * Only set write access if already dirty...
+     * otherwise wait for dirty access.
+     */
+    if (in->access_type != MMU_DATA_STORE && !dirty) {
+        out->prot &= ~PAGE_WRITE;
+    }
 
     out->paddr = paddr & x86_get_a20_mask(env);
+
     return true;
 }
 

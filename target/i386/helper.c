@@ -249,7 +249,7 @@ hwaddr x86_cpu_get_phys_page_attrs_debug(CPUState *cs, vaddr addr,
 
     /* This function merges the offset bits for us */
     if (!x86_ptw_translate(cs, addr, &paddr, true, 0, false, MMU_DATA_LOAD,
-                           NULL, NULL, NULL, NULL, NULL)) {
+                           NULL, NULL, NULL, NULL, NULL, NULL)) {
         return -1;
     }
 
