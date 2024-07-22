@@ -374,7 +374,7 @@ x86_get_pte(CPUState *cs, hwaddr node, int i, int height, DecodedPTE *pt_entry,
                 pt_entry->user_exec_ok = !(pte_contents & PG_NX_MASK);
             } else {
                 pt_entry->super_exec_ok = true;
-                pt_entry->user_exec_ok = !(pte_contents & PG_USER_MASK);
+                pt_entry->user_exec_ok = !!(pte_contents & PG_USER_MASK);
             }
 
             if (pte_contents & PG_USER_MASK) {
@@ -713,7 +713,11 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                     if (access_type == MMU_DATA_STORE) {
                         *error_code |= PG_ERROR_W_MASK;
                     } else if (access_type == MMU_INST_FETCH) {
-                        *error_code |= PG_ERROR_I_D_MASK;
+                        if (pg_mode & PG_MODE_SMEP
+                            || (pg_mode & PG_MODE_NXE
+                                && pg_mode & PG_MODE_PAE)) {
+                            *error_code |= PG_ERROR_I_D_MASK;
+                        }
                     }
                 }
             }
@@ -743,7 +747,11 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                 case MMU_DATA_LOAD:
                     if(!pt_entry.user_read_ok) {
                         if (error_code) {
-                            *error_code |= PG_ERROR_U_MASK | PG_ERROR_P_MASK;
+                            *error_code |= PG_ERROR_U_MASK;
+                            /* We can only set the P bit on a leaf */
+                            if (pt_entry.leaf) {
+                                *error_code |=  PG_ERROR_P_MASK;
+                            }
                         }
                         goto fault_out;
                     }
@@ -751,7 +759,11 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                 case MMU_DATA_STORE:
                     if(!pt_entry.user_write_ok) {
                         if (error_code) {
-                            *error_code |= PG_ERROR_P_MASK | PG_ERROR_W_MASK | PG_ERROR_U_MASK;
+                            *error_code |=  PG_ERROR_W_MASK | PG_ERROR_U_MASK;
+                            /* We can only set the P bit on a leaf */
+                            if (pt_entry.leaf) {
+                                *error_code |=  PG_ERROR_P_MASK;
+                            }
                         }
                         goto fault_out;
                     }
@@ -759,7 +771,16 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                 case MMU_INST_FETCH:
                     if(!pt_entry.user_exec_ok) {
                         if (error_code) {
-                            *error_code = PG_ERROR_P_MASK | PG_ERROR_I_D_MASK | PG_ERROR_U_MASK;
+                            *error_code |=  PG_ERROR_U_MASK;
+                            if (pg_mode & PG_MODE_SMEP
+                                || (pg_mode & PG_MODE_NXE
+                                    && pg_mode & PG_MODE_PAE)) {
+                                *error_code |= PG_ERROR_I_D_MASK;
+                                /* We can only set the P bit on a leaf */
+                                if (pt_entry.leaf) {
+                                    *error_code |=  PG_ERROR_P_MASK;
+                                }
+                            }
                         }
                         goto fault_out;
                     }
@@ -771,7 +792,7 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                 switch (access_type) {
                 case MMU_DATA_LOAD:
                     if(!pt_entry.super_read_ok) {
-                        if (error_code) {
+                        if (error_code && pt_entry.leaf) {
                             /* Not a distinct super+r mask */
                             *error_code |= PG_ERROR_P_MASK;
                         }
@@ -781,7 +802,12 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                 case MMU_DATA_STORE:
                     if(!pt_entry.super_write_ok) {
                         if (error_code) {
-                            *error_code = PG_ERROR_P_MASK | PG_ERROR_W_MASK;
+                            *error_code |= PG_ERROR_P_MASK | PG_ERROR_W_MASK;
+                            /* We can only set the P bit on a leaf */
+                            if (pt_entry.leaf) {
+                                *error_code |=  PG_ERROR_P_MASK;
+                            }
+
                         }
                         goto fault_out;
                     }
@@ -789,7 +815,16 @@ bool x86_ptw_translate(CPUState *cs, vaddr vaddress, hwaddr *hpa,
                 case MMU_INST_FETCH:
                     if(!pt_entry.super_exec_ok) {
                         if (error_code) {
-                            *error_code = PG_ERROR_P_MASK | PG_ERROR_I_D_MASK;
+                            /* We can only set the P bit on a leaf */
+                            if (pt_entry.leaf) {
+                                *error_code |=  PG_ERROR_P_MASK;
+                            }
+                            if (pg_mode & PG_MODE_SMEP
+                                || (pg_mode & PG_MODE_NXE
+                                    && pg_mode & PG_MODE_PAE)) {
+                                *error_code |= PG_ERROR_I_D_MASK;
+                            }
+
                         }
                         goto fault_out;
                     }
