@@ -12,6 +12,43 @@
 
 #include "hw/core/cpu.h"
 
+/*
+ * struct mem_print_state: Used by qmp in walking page tables.
+ */
+struct mem_print_state {
+    GString *buf;
+    CPUArchState *env;
+    int vaw, paw; /* VA and PA width in characters */
+    int max_height;
+    int mmu_idx; /* 0 == user mode, 1 == nested page table */
+    bool (*flusher)(CPUState *cs, struct mem_print_state *state);
+    bool flush_interior; /* If false, only call flusher() on leaves */
+    bool require_physical_contiguity;
+    /*
+     * The height at which we started accumulating ranges, i.e., the
+     * next height we need to print once we hit the end of a
+     * contiguous range.
+     */
+    int start_height;
+    int leaf_height; /* The height at which we found a leaf, or -1 */
+    /*
+     * For compressing contiguous ranges, track the
+     * start and end of the range
+     */
+    hwaddr vstart[MAX_HEIGHT + 1]; /* Starting virt. addr. of open pte range */
+    hwaddr vend[MAX_HEIGHT + 1]; /* Ending virtual address of open pte range */
+    hwaddr pstart; /* Starting physical address of open pte range */
+    hwaddr pend; /* Ending physical address of open pte range */
+
+    /* PTE protection flags current root->leaf path */
+    uint64_t prot[MAX_HEIGHT + 1];
+
+    /* Page size (leaf) or address range covered (non-leaf). */
+    uint64_t pg_size[MAX_HEIGHT + 1];
+    int offset[MAX_HEIGHT + 1]; /* PTE range starting offsets */
+    int last_offset[MAX_HEIGHT + 1]; /* PTE range ending offsets */
+};
+
 typedef enum TranslateFaultStage2 {
     S2_NONE,
     S2_GPA,
@@ -30,7 +67,7 @@ typedef struct SysemuCPUOps {
     /**
      * @get_paging_enabled: Callback for inquiring whether paging is enabled.
      */
-    bool (*get_paging_enabled)(const CPUState *cpu);
+    bool (*get_paging_enabled)(const CPUState *cpu, int mmu_idx);
     /**
      * @get_phys_page_debug: Callback for obtaining a physical address.
      */
@@ -93,6 +130,105 @@ typedef struct SysemuCPUOps {
      */
     const VMStateDescription *legacy_vmsd;
 
+    /**
+     * page_table_root - Given a CPUState, return the physical address
+     *                    of the current page table root, as well as
+     *                    setting a pointer to a PageTableLayout.
+     *
+     * @cs - CPU state
+     * @layout - a pointer to a PageTableLayout structure, which stores
+     *           the page table tree geometry.
+     * @mmu_idx - Which level of the mmu we are interested in:
+     *            0 == user mode, 1 == nested page table
+     *            Note that MMU_*_IDX macros are not consistent across
+     *            architectures.
+     *
+     * Returns a hardware address on success.  Should not fail (i.e.,
+     * caller is responsible to ensure that a page table is actually
+     * present, or that, with nested paging, there is a nested table
+     * present).
+     *
+     * Do not free layout.
+     */
+    hwaddr (*page_table_root)(CPUState *cs, const PageTableLayout **layout,
+                              int mmu_idx);
+
+    /**
+     * get_pte - Copy and decode the contents of the page table entry at
+     *           node[i] into pt_entry.
+     *
+     * @cs - CPU state
+     * @node - physical address of the current page table node
+     * @i - index (in page table entries, not bytes) of the page table
+     *      entry, within node
+     * @height - height of node within the tree (leaves are 1, not 0)
+     * @pt_entry - Pointer to a DecodedPTE, stores the contents of the page
+     *             table entry
+     * @vaddr_parent - The virtual address bits already translated in
+     *                 walking the page table to node.  Optional: only
+     *                 used if vaddr_pte is set.
+     * @debug - If true, do not update softmmu state (if applicable) to reflect
+     *              the page table walk.
+     * @mmu_idx - Which level of the mmu we are interested in:
+     *            0 == user mode, 1 == nested page table
+     *            Note that MMU_*_IDX macros are not consistent across
+     *            architectures.
+     * @user_access - For non-debug accesses, true if a user mode access, false
+     *                if supervisor mode access.  Used to determine faults.
+     * @access_type - For non-debug accesses, what type of access is driving the
+     *                lookup.  Used to determine faults.
+     * @error_code - Optional integer pointer, to store error reason on failure
+     * @fault_addr - Optional vaddr pointer, to store the faulting address on a
+     *               recursive page walk for the pe.  Otherwise, caller is
+     *               expected to determine if this pte access would fault.
+     * @nested_fault - Optional pointer, to differentiate causes of nested
+     *                 faults.  Set to true if there is a fault recurring on a
+     *                 nested page table.
+     *
+     * Returns true on success, false on failure.  This should only fail if a
+     * page table entry cannot be read because the address of node is not a
+     * valid (guest) physical address.  Otherwise, we capture errors like bad
+     * reserved flags in the DecodedPTE entry and let the caller decide how to
+     * handle it.
+     */
+
+    bool (*get_pte)(CPUState *cs, hwaddr node, int i, int height,
+                    DecodedPTE *pt_entry, vaddr vaddr_parent, bool debug,
+                    int mmu_idx, bool user_access,
+                    const MMUAccessType access_type, int *error_code,
+                    hwaddr *fault_addr, TranslateFaultStage2 *nested_fault);
+
+    /**
+     * @mon_init_page_table_iterator: Callback to configure a page table
+     * iterator for use by a monitor function.
+     * Returns true on success, false if not supported (e.g., no paging disabled
+     * or not implemented on this CPU).
+     *
+     * @mmu_idx - Which level of the mmu we are interested in:
+     *            0 == user mode, 1 == nested page table
+     *            Note that MMU_*_IDX macros are not consistent across
+     *            architectures.
+     */
+    bool (*mon_init_page_table_iterator)(CPUState *cpu, GString *buf,
+                                         int mmu_idx,
+                                         struct mem_print_state *state);
+
+    /**
+     * @mon_info_pg_print_header: Prints the header line for 'info pg'.
+     */
+    void (*mon_info_pg_print_header)(struct mem_print_state *state);
+
+    /**
+     * @flush_page_table_iterator_state: For 'info pg', it prints the last
+     * entry that was visited by the compressing_iterator, if one is present.
+     */
+    bool (*mon_flush_page_print_state)(CPUState *cs,
+                                       struct mem_print_state *state);
+
 } SysemuCPUOps;
+
+int compressing_iterator(CPUState *cs, void *data, DecodedPTE *pte,
+                         int height, int offset, int mmu_idx,
+                         const PageTableLayout *layout);
 
 #endif /* SYSEMU_CPU_OPS_H */

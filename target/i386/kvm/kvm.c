@@ -65,6 +65,8 @@
 #include "exec/memattrs.h"
 #include "trace.h"
 
+#include "vmcs12.h"
+
 #include CONFIG_DEVICES
 
 //#define DEBUG_KVM
@@ -4675,6 +4677,72 @@ static int kvm_get_nested_state(X86CPU *cpu)
     } else {
         env->hflags &= ~HF_GUEST_MASK;
     }
+
+
+    if (env->hflags & HF_GUEST_MASK) {
+
+        /* Extract the EPTP value from vmcs12 structure, store in arch state */
+        if (env->nested_state->format == KVM_STATE_NESTED_FORMAT_VMX) {
+            struct vmcs12 *vmcs =
+                (struct vmcs12 *) env->nested_state->data.vmx->vmcs12;
+
+            assert(vmcs->hdr.revision_id == VMCS12_REVISION);
+
+            /* See if EPT is enabled */
+            if (vmcs->secondary_vm_exec_control &
+                VMX_SECONDARY_EXEC_ENABLE_EPT) {
+                env->nested_paging = true;
+                env->nested_pg_format = 0;
+
+                /* Decode the ept pointer following SDM 24.6.11 */
+                /* The height of the tree is encoded in bits 5:3, height -1 */
+                uint8_t height = (uint8_t) (vmcs->ept_pointer >> 3);
+                height &= 7;
+                height++;
+                env->nested_pg_height = height;
+                /* The accessed/dirty flag is in bit 6 of the EPTP*/
+                env->enable_ept_accessed_dirty =
+                    !!(vmcs->ept_pointer & (1 << 6));
+
+                /* Mask out low 12 bits, bits beyond physical addr width */
+                uint64_t phys_mask = MAKE_64BIT_MASK(0, cpu->phys_bits);
+                phys_mask &= ~0xfff;
+                env->nested_pg_root = vmcs->ept_pointer & phys_mask;
+
+                if (vmcs->secondary_vm_exec_control &
+                    VMX_SECONDARY_EXEC_ENABLE_MODE_BASED_EXC) {
+                    env->enable_mode_based_access_control = true;
+                } else {
+                    env->enable_mode_based_access_control = false;
+                }
+            } else {
+                env->nested_paging = false;
+                env->enable_mode_based_access_control = false;
+            }
+            env->vm_state_valid = true;
+        } else if (env->nested_state->format == KVM_STATE_NESTED_FORMAT_SVM) {
+            struct vmcb *vmcb = (struct vmcb *) env->nested_state->data.svm;
+
+            /* See if nested paging is enabled */
+            if (vmcb->control.nested_ctl & SVM_NPT_ENABLED) {
+                env->nested_paging = true;
+                env->nested_pg_format = 1;
+                env->nested_pg_root = vmcb->control.nested_cr3;
+
+                env->nested_pg_height = env->cr[4] & CR4_LA57_MASK ?
+                    5 : 4;
+
+                env->enable_ept_accessed_dirty = false;
+                env->enable_mode_based_access_control = false;
+
+            } else {
+                env->nested_paging = false;
+                env->enable_mode_based_access_control = false;
+            }
+            env->vm_state_valid = true;
+        }
+    }
+
 
     /* Keep HF2_GIF_MASK set on !SVM as x86_cpu_pending_interrupt() needs it */
     if (cpu_has_svm(env)) {

@@ -8050,11 +8050,25 @@ static int64_t x86_cpu_get_arch_id(CPUState *cs)
 }
 
 #if !defined(CONFIG_USER_ONLY)
-static bool x86_cpu_get_paging_enabled(const CPUState *cs)
+static bool x86_cpu_get_paging_enabled(const CPUState *cs, int mmu_idx)
 {
     X86CPU *cpu = X86_CPU(cs);
 
-    return cpu->env.cr[0] & CR0_PG_MASK;
+    if (mmu_idx == 0) {
+        return cpu->env.cr[0] & CR0_PG_MASK;
+    } else if (mmu_idx == 1) {
+        if (cpu->env.hflags & HF_GUEST_MASK) {
+            if (!cpu->env.vm_state_valid) {
+                warn_report_once("Attempt to query virtualization state on an"
+                                 "unsupported accelerator.  This operation will"
+                                 "not work properly on this configuration.");
+                return false;
+            }
+
+            return cpu->env.nested_paging;
+        }
+    }
+    return false;
 }
 #endif /* !CONFIG_USER_ONLY */
 
@@ -8369,6 +8383,11 @@ static const struct SysemuCPUOps i386_sysemu_ops = {
     .write_elf32_qemunote = x86_cpu_write_elf32_qemunote,
     .write_elf64_qemunote = x86_cpu_write_elf64_qemunote,
     .legacy_vmsd = &vmstate_x86_cpu,
+    .page_table_root = &x86_page_table_root,
+    .get_pte = &x86_get_pte,
+    .mon_init_page_table_iterator = &x86_mon_init_page_table_iterator,
+    .mon_info_pg_print_header = &x86_mon_info_pg_print_header,
+    .mon_flush_page_print_state = &x86_mon_flush_print_pg_state,
 };
 #endif
 
