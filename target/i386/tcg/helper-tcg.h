@@ -96,7 +96,7 @@ void cpu_load_eflags(CPUX86State *env, int eflags, int update_mask);
 typedef struct TranslateFault {
     int exception_index;
     int error_code;
-    target_ulong cr2;
+    uint64_t cr2;
     TranslateFaultStage2 stage2;
 } TranslateFault;
 
